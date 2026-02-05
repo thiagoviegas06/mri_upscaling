@@ -3,6 +3,7 @@ from pathlib import Path
 import numpy as np
 import nibabel as nib
 import torch
+from nibabel.processing import resample_from_to
 
 from model import UNet3D
 from preprocessing import preprocess_volume
@@ -50,16 +51,28 @@ def predict_volume(model, volume, patch_size=96, stride=48, device="cpu"):
     return accum / np.maximum(weight, 1e-8)
 
 
+def get_hf_template(hf_dir="mri_resolution/train/high_field"):
+    hf_dir = Path(hf_dir)
+    hf_files = sorted(list(hf_dir.glob("*.nii")))
+    if not hf_files:
+        raise FileNotFoundError(f"No HF template found in {hf_dir}")
+    return nib.load(str(hf_files[0]))
+
+
 def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = load_model("best.ckpt", device=device, base=32)
+
+    hf_template = get_hf_template()
 
     test_dir = Path("mri_resolution/test/low_field")
     predictions = {}
 
     for low_path in sorted(test_dir.glob("*.nii")):
         sample_id = low_path.name.replace("_lowfield.nii", "")
-        volume = nib.load(str(low_path)).get_fdata().astype(np.float32)
+        lf_img = nib.load(str(low_path))
+        lf_resampled = resample_from_to(lf_img, hf_template, order=1)
+        volume = lf_resampled.get_fdata().astype(np.float32)
         volume = preprocess_volume(volume)
 
         pred = predict_volume(model, volume, patch_size=96, stride=48, device=device)
