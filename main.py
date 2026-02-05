@@ -8,7 +8,7 @@ from mri_resolution.extract_slices import (
 
 import os, random
 import torch
-from torch.cuda.amp import GradScaler
+from torch.amp import GradScaler
 from torch.utils.data import DataLoader
 
 from model import UNet3D
@@ -55,14 +55,15 @@ if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = UNet3D(base=32).to(device)
     optim = torch.optim.AdamW(model.parameters(), lr=2e-4, weight_decay=1e-4)
-    scaler = GradScaler()
+    scaler = GradScaler("cuda") if device == "cuda" else None
 
     best_val = float("inf")
     save_dir = os.environ.get("MODEL_DESTINATION", "checkpoints")
     os.makedirs(save_dir, exist_ok=True)
     best_path = os.path.join(save_dir, "best.ckpt")
 
-    for epoch in range(1, 21):
+    num_epochs = 50
+    for epoch in range(1, num_epochs + 1):
         train_loss = train_one_epoch(model, train_loader, optim, device, scaler)
         val_loss   = validate(model, val_loader, device)
 

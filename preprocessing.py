@@ -26,17 +26,28 @@ def load_pair_resample_normalize(lf_path, hf_path, interp_order=1):
 
     return lf, hf  # numpy arrays, same shape (179,221,200)
 
-def random_patch_coords(vol_shape, patch_size):
+def random_patch_coords(vol_shape, patch_size, mask=None, min_foreground_ratio=0.05, max_tries=20):
     # vol_shape: (X,Y,Z)
     x_max = vol_shape[0] - patch_size
     y_max = vol_shape[1] - patch_size
     z_max = vol_shape[2] - patch_size
     if min(x_max, y_max, z_max) < 0:
         raise ValueError(f"Patch size {patch_size} too large for volume shape {vol_shape}")
-    x = random.randint(0, x_max)
-    y = random.randint(0, y_max)
-    z = random.randint(0, z_max)
+    x = y = z = 0
+    for _ in range(max_tries):
+        x = random.randint(0, x_max)
+        y = random.randint(0, y_max)
+        z = random.randint(0, z_max)
+        if mask is None:
+            return x, y, z
+        patch_mask = mask[x:x+patch_size, y:y+patch_size, z:z+patch_size]
+        if patch_mask.mean() >= min_foreground_ratio:
+            return x, y, z
     return x, y, z
+
+def compute_foreground_mask(volume, percentile=20):
+    thresh = np.percentile(volume, percentile)
+    return volume > thresh
 
 def extract_patch(vol, x, y, z, patch_size):
     return vol[x:x+patch_size, y:y+patch_size, z:z+patch_size]
@@ -47,7 +58,8 @@ class MRIPatchDataset(Dataset):
     Returns random LF/HF patch pairs.
     Each __getitem__ picks a random patch from one subject volume.
     """
-    def __init__(self, pairs, patch_size=96, patches_per_volume=64, cache_volumes=True):
+    def __init__(self, pairs, patch_size=96, patches_per_volume=64, cache_volumes=True,
+                 tissue_sampling=True, foreground_percentile=20, min_foreground_ratio=0.05, max_tries=20):
         """
         pairs: list of (lf_path, hf_path)
         patches_per_volume: how many patches to draw per volume per epoch
@@ -57,6 +69,10 @@ class MRIPatchDataset(Dataset):
         self.patch_size = patch_size
         self.patches_per_volume = patches_per_volume
         self.cache_volumes = cache_volumes
+        self.tissue_sampling = tissue_sampling
+        self.foreground_percentile = foreground_percentile
+        self.min_foreground_ratio = min_foreground_ratio
+        self.max_tries = max_tries
         self._cache = {}  # idx -> (lf_np, hf_np)
 
         # Make dataset length = number of "patch samples" per epoch
@@ -71,16 +87,25 @@ class MRIPatchDataset(Dataset):
 
         lf_path, hf_path = self.pairs[vol_idx]
         lf, hf = load_pair_resample_normalize(lf_path, hf_path, interp_order=1)
+        mask = None
+        if self.tissue_sampling:
+            mask = compute_foreground_mask(lf, percentile=self.foreground_percentile)
 
         if self.cache_volumes:
-            self._cache[vol_idx] = (lf, hf)
-        return lf, hf
+            self._cache[vol_idx] = (lf, hf, mask)
+        return lf, hf, mask
 
     def __getitem__(self, idx):
         vol_idx = idx // self.patches_per_volume
-        lf, hf = self._get_volume_pair(vol_idx)
+        lf, hf, mask = self._get_volume_pair(vol_idx)
 
-        x, y, z = random_patch_coords(lf.shape, self.patch_size)
+        x, y, z = random_patch_coords(
+            lf.shape,
+            self.patch_size,
+            mask=mask,
+            min_foreground_ratio=self.min_foreground_ratio,
+            max_tries=self.max_tries,
+        )
         lf_p = extract_patch(lf, x, y, z, self.patch_size)
         hf_p = extract_patch(hf, x, y, z, self.patch_size)
 
