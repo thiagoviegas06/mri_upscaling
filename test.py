@@ -61,7 +61,7 @@ def get_hf_template(hf_dir="mri_resolution/train/high_field"):
 
 def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = load_model("best.ckpt", device=device, base=32)
+    model = load_model("best.ckpt", device=device, base=48)
 
     hf_template = get_hf_template()
 

@@ -53,7 +53,7 @@ if __name__ == "__main__":
     val_loader   = DataLoader(val_ds,   batch_size=2, shuffle=False, num_workers=2, pin_memory=True)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = UNet3D(base=32).to(device)
+    model = UNet3D(base=48).to(device)
     optim = torch.optim.AdamW(model.parameters(), lr=2e-4, weight_decay=1e-4)
     scaler = GradScaler("cuda") if device == "cuda" else None
 

@@ -15,24 +15,66 @@ class DoubleConv(nn.Module):
         )
     def forward(self, x): return self.net(x)
 
+class ResidualBlock(nn.Module):
+    def __init__(self, in_ch, out_ch):
+        super().__init__()
+        self.conv1 = nn.Conv3d(in_ch, out_ch, 3, padding=1)
+        self.norm1 = nn.InstanceNorm3d(out_ch)
+        self.act1 = nn.LeakyReLU(0.1, inplace=True)
+        self.conv2 = nn.Conv3d(out_ch, out_ch, 3, padding=1)
+        self.norm2 = nn.InstanceNorm3d(out_ch)
+        self.act2 = nn.LeakyReLU(0.1, inplace=True)
+
+        self.skip = None
+        if in_ch != out_ch:
+            self.skip = nn.Conv3d(in_ch, out_ch, 1)
+
+    def forward(self, x):
+        identity = x if self.skip is None else self.skip(x)
+        out = self.act1(self.norm1(self.conv1(x)))
+        out = self.norm2(self.conv2(out))
+        out = self.act2(out + identity)
+        return out
+
+class AttentionGate3D(nn.Module):
+    def __init__(self, in_ch, gating_ch, inter_ch):
+        super().__init__()
+        self.theta = nn.Conv3d(in_ch, inter_ch, 1, bias=False)
+        self.phi = nn.Conv3d(gating_ch, inter_ch, 1, bias=False)
+        self.psi = nn.Conv3d(inter_ch, 1, 1, bias=True)
+        self.norm = nn.InstanceNorm3d(inter_ch)
+        self.act = nn.LeakyReLU(0.1, inplace=True)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x, g):
+        # x: skip connection, g: gating (decoder)
+        theta_x = self.theta(x)
+        phi_g = self.phi(g)
+        f = self.act(self.norm(theta_x + phi_g))
+        attn = self.sigmoid(self.psi(f))
+        return x * attn
+
 class UNet3D(nn.Module):
     def __init__(self, in_ch=1, out_ch=1, base=32):
         super().__init__()
-        self.enc1 = DoubleConv(in_ch, base)
+        self.enc1 = ResidualBlock(in_ch, base)
         self.pool1 = nn.MaxPool3d(2)
-        self.enc2 = DoubleConv(base, base*2)
+        self.enc2 = ResidualBlock(base, base*2)
         self.pool2 = nn.MaxPool3d(2)
-        self.enc3 = DoubleConv(base*2, base*4)
+        self.enc3 = ResidualBlock(base*2, base*4)
         self.pool3 = nn.MaxPool3d(2)
 
-        self.bott = DoubleConv(base*4, base*8)
+        self.bott = ResidualBlock(base*4, base*8)
 
         self.up3 = nn.ConvTranspose3d(base*8, base*4, 2, stride=2)
-        self.dec3 = DoubleConv(base*8, base*4)
+        self.att3 = AttentionGate3D(base*4, base*4, base*2)
+        self.dec3 = ResidualBlock(base*8, base*4)
         self.up2 = nn.ConvTranspose3d(base*4, base*2, 2, stride=2)
-        self.dec2 = DoubleConv(base*4, base*2)
+        self.att2 = AttentionGate3D(base*2, base*2, base)
+        self.dec2 = ResidualBlock(base*4, base*2)
         self.up1 = nn.ConvTranspose3d(base*2, base, 2, stride=2)
-        self.dec1 = DoubleConv(base*2, base)
+        self.att1 = AttentionGate3D(base, base, base//2)
+        self.dec1 = ResidualBlock(base*2, base)
 
         self.out = nn.Conv3d(base, out_ch, 1)
 
@@ -43,10 +85,13 @@ class UNet3D(nn.Module):
         b  = self.bott(self.pool3(e3))
 
         d3 = self.up3(b)
-        d3 = self.dec3(torch.cat([d3, e3], dim=1))
+        e3_g = self.att3(e3, d3)
+        d3 = self.dec3(torch.cat([d3, e3_g], dim=1))
         d2 = self.up2(d3)
-        d2 = self.dec2(torch.cat([d2, e2], dim=1))
+        e2_g = self.att2(e2, d2)
+        d2 = self.dec2(torch.cat([d2, e2_g], dim=1))
         d1 = self.up1(d2)
-        d1 = self.dec1(torch.cat([d1, e1], dim=1))
+        e1_g = self.att1(e1, d1)
+        d1 = self.dec1(torch.cat([d1, e1_g], dim=1))
 
         return self.out(d1)
