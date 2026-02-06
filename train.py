@@ -38,9 +38,18 @@ def ssim_3d(x, y, window_size=7, sigma=1.5, data_range=1.0):
     ssim_map = ((2 * mu_xy + c1) * (2 * sigma_xy + c2)) / ((mu_x2 + mu_y2 + c1) * (sigma_x2 + sigma_y2 + c2))
     return ssim_map.mean()
 
-def train_one_epoch(model, loader, optim, device, scaler):
+def _compute_loss(pred, target, loss_weights):
+    l1 = F.l1_loss(pred, target)
+    l2 = F.mse_loss(pred, target)
+    ssim = ssim_3d(pred, target, data_range=1.0)
+    return (loss_weights["l1"] * l1) + (loss_weights["l2"] * l2) + (loss_weights["ssim"] * (1.0 - ssim))
+
+def train_one_epoch(model, loader, optim, device, scaler, loss_weights=None):
     model.train()
     running = 0.0
+
+    if loss_weights is None:
+        loss_weights = {"l1": 1.0, "l2": 0.0, "ssim": 1.0}
 
     for lf, hf in loader:
         lf = lf.to(device, non_blocking=True)
@@ -51,9 +60,7 @@ def train_one_epoch(model, loader, optim, device, scaler):
         amp_ctx = autocast(device_type="cuda") if device == "cuda" else contextlib.nullcontext()
         with amp_ctx:
             pred = model(lf)
-            l1 = F.l1_loss(pred, hf)
-            ssim = ssim_3d(pred, hf, data_range=1.0)
-            loss = l1 + (1.0 - ssim)
+            loss = _compute_loss(pred, hf, loss_weights)
 
         if scaler is not None and device == "cuda":
             scaler.scale(loss).backward()
@@ -68,9 +75,12 @@ def train_one_epoch(model, loader, optim, device, scaler):
     return running / max(1, len(loader))
 
 @torch.no_grad()
-def validate(model, loader, device):
+def validate(model, loader, device, loss_weights=None):
     model.eval()
     running = 0.0
+
+    if loss_weights is None:
+        loss_weights = {"l1": 1.0, "l2": 0.0, "ssim": 1.0}
 
     for lf, hf in loader:
         lf = lf.to(device, non_blocking=True)
@@ -79,9 +89,7 @@ def validate(model, loader, device):
         amp_ctx = autocast(device_type="cuda") if device == "cuda" else contextlib.nullcontext()
         with amp_ctx:
             pred = model(lf)
-            l1 = F.l1_loss(pred, hf)
-            ssim = ssim_3d(pred, hf, data_range=1.0)
-            loss = l1 + (1.0 - ssim)
+            loss = _compute_loss(pred, hf, loss_weights)
 
         running += loss.item()
 

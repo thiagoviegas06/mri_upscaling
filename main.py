@@ -62,17 +62,36 @@ if __name__ == "__main__":
     os.makedirs(save_dir, exist_ok=True)
     best_path = os.path.join(save_dir, "best.ckpt")
 
-    num_epochs = 50
-    for epoch in range(1, num_epochs + 1):
-        train_loss = train_one_epoch(model, train_loader, optim, device, scaler)
-        val_loss   = validate(model, val_loader, device)
+    pretrain_epochs = 50
+    finetune_epochs = 20
 
-        print(f"epoch {epoch:02d} | train L1: {train_loss:.5f} | val L1: {val_loss:.5f}")
+    pretrain_weights = {"l1": 1.0, "l2": 0.0, "ssim": 1.0}
+    finetune_weights = {"l1": 0.3, "l2": 0.5, "ssim": 0.2}
+
+    for epoch in range(1, pretrain_epochs + 1):
+        train_loss = train_one_epoch(model, train_loader, optim, device, scaler, loss_weights=pretrain_weights)
+        val_loss   = validate(model, val_loader, device, loss_weights=pretrain_weights)
+
+        print(f"pretrain {epoch:02d} | loss: {train_loss:.5f} | val: {val_loss:.5f}")
 
         if val_loss < best_val:
             best_val = val_loss
             torch.save(
                 {"epoch": epoch, "model": model.state_dict(), "optim": optim.state_dict(), "val_loss": val_loss},
+                best_path
+            )
+            print("Saved best to:", best_path)
+
+    for epoch in range(1, finetune_epochs + 1):
+        train_loss = train_one_epoch(model, train_loader, optim, device, scaler, loss_weights=finetune_weights)
+        val_loss   = validate(model, val_loader, device, loss_weights=finetune_weights)
+
+        print(f"finetune {epoch:02d} | loss: {train_loss:.5f} | val: {val_loss:.5f}")
+
+        if val_loss < best_val:
+            best_val = val_loss
+            torch.save(
+                {"epoch": pretrain_epochs + epoch, "model": model.state_dict(), "optim": optim.state_dict(), "val_loss": val_loss},
                 best_path
             )
             print("Saved best to:", best_path)
