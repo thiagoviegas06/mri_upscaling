@@ -12,10 +12,11 @@ from torch.amp import GradScaler
 from torch.utils.data import DataLoader
 
 from model import UNet3D
-from train import train_one_epoch, validate
+from train import train_one_epoch, validate, validate_full_volume
 from preprocessing import MRIPatchDataset
 
 def make_pairs(lf_dir, hf_dir):
+    # Build paired (LF, HF) file list based on naming convention.
     pairs = []
     for fname in sorted(os.listdir(lf_dir)):
         if not (fname.endswith(".nii") or fname.endswith(".nii.gz")):
@@ -28,6 +29,7 @@ def make_pairs(lf_dir, hf_dir):
     return pairs
 
 def split_pairs(pairs, val_frac=0.2, seed=42):
+    # Shuffle and split pairs into train/val subsets.
     pairs = list(pairs)
     rng = random.Random(seed)
     rng.shuffle(pairs)
@@ -54,7 +56,7 @@ if __name__ == "__main__":
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = UNet3D(base=48).to(device)
-    optim = torch.optim.AdamW(model.parameters(), lr=2e-4, weight_decay=1e-4)
+    optim = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-4)
     scaler = GradScaler("cuda") if device == "cuda" else None
 
     best_val = float("inf")
@@ -67,31 +69,88 @@ if __name__ == "__main__":
 
     pretrain_weights = {"l1": 1.0, "l2": 0.0, "ssim": 1.0}
     finetune_weights = {"l1": 0.3, "l2": 0.5, "ssim": 0.2}
+    
+    val_full_every = 5
+    val_full_max_volumes = 2
 
     for epoch in range(1, pretrain_epochs + 1):
-        train_loss = train_one_epoch(model, train_loader, optim, device, scaler, loss_weights=pretrain_weights)
-        val_loss   = validate(model, val_loader, device, loss_weights=pretrain_weights)
+        train_metrics = train_one_epoch(model, train_loader, optim, device, scaler, loss_weights=pretrain_weights)
+        val_metrics   = validate(model, val_loader, device, loss_weights=pretrain_weights)
 
-        print(f"pretrain {epoch:02d} | loss: {train_loss:.5f} | val: {val_loss:.5f}")
+        if not torch.isfinite(torch.tensor(train_metrics["loss"])) or train_metrics["loss"] > 5.0:
+            print("Stopping: training loss exploded.")
+            break
 
-        if val_loss < best_val:
-            best_val = val_loss
+        msg = (
+            f"pretrain {epoch:02d} | loss: {train_metrics['loss']:.5f} "
+            f"| l1: {train_metrics['l1']:.5f} | l2: {train_metrics['l2']:.5f} "
+            f"| ssim: {train_metrics['ssim']:.5f} | val: {val_metrics['loss']:.5f} "
+            f"| val_l1: {val_metrics['l1']:.5f} | val_l2: {val_metrics['l2']:.5f} "
+            f"| val_ssim: {val_metrics['ssim']:.5f}"
+        )
+        if epoch % val_full_every == 0:
+            val_full = validate_full_volume(
+                model,
+                val_pairs,
+                device,
+                loss_weights=pretrain_weights,
+                patch_size=patch_size,
+                stride=patch_size // 2,
+                max_volumes=val_full_max_volumes,
+            )
+            msg += (
+                f" | val_full: {val_full['loss']:.5f}"
+                f" | val_full_l1: {val_full['l1']:.5f}"
+                f" | val_full_l2: {val_full['l2']:.5f}"
+                f" | val_full_ssim: {val_full['ssim']:.5f}"
+            )
+        print(msg)
+
+        if val_metrics["loss"] < best_val:
+            best_val = val_metrics["loss"]
             torch.save(
-                {"epoch": epoch, "model": model.state_dict(), "optim": optim.state_dict(), "val_loss": val_loss},
+                {"epoch": epoch, "model": model.state_dict(), "optim": optim.state_dict(), "val_loss": val_metrics["loss"]},
                 best_path
             )
             print("Saved best to:", best_path)
 
     for epoch in range(1, finetune_epochs + 1):
-        train_loss = train_one_epoch(model, train_loader, optim, device, scaler, loss_weights=finetune_weights)
-        val_loss   = validate(model, val_loader, device, loss_weights=finetune_weights)
+        train_metrics = train_one_epoch(model, train_loader, optim, device, scaler, loss_weights=finetune_weights)
+        val_metrics   = validate(model, val_loader, device, loss_weights=finetune_weights)
 
-        print(f"finetune {epoch:02d} | loss: {train_loss:.5f} | val: {val_loss:.5f}")
+        if not torch.isfinite(torch.tensor(train_metrics["loss"])) or train_metrics["loss"] > 5.0:
+            print("Stopping: training loss exploded.")
+            break
 
-        if val_loss < best_val:
-            best_val = val_loss
+        msg = (
+            f"finetune {epoch:02d} | loss: {train_metrics['loss']:.5f} "
+            f"| l1: {train_metrics['l1']:.5f} | l2: {train_metrics['l2']:.5f} "
+            f"| ssim: {train_metrics['ssim']:.5f} | val: {val_metrics['loss']:.5f} "
+            f"| val_l1: {val_metrics['l1']:.5f} | val_l2: {val_metrics['l2']:.5f} "
+            f"| val_ssim: {val_metrics['ssim']:.5f}"
+        )
+        if epoch % val_full_every == 0:
+            val_full = validate_full_volume(
+                model,
+                val_pairs,
+                device,
+                loss_weights=finetune_weights,
+                patch_size=patch_size,
+                stride=patch_size // 2,
+                max_volumes=val_full_max_volumes,
+            )
+            msg += (
+                f" | val_full: {val_full['loss']:.5f}"
+                f" | val_full_l1: {val_full['l1']:.5f}"
+                f" | val_full_l2: {val_full['l2']:.5f}"
+                f" | val_full_ssim: {val_full['ssim']:.5f}"
+            )
+        print(msg)
+
+        if val_metrics["loss"] < best_val:
+            best_val = val_metrics["loss"]
             torch.save(
-                {"epoch": pretrain_epochs + epoch, "model": model.state_dict(), "optim": optim.state_dict(), "val_loss": val_loss},
+                {"epoch": pretrain_epochs + epoch, "model": model.state_dict(), "optim": optim.state_dict(), "val_loss": val_metrics["loss"]},
                 best_path
             )
             print("Saved best to:", best_path)

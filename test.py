@@ -11,6 +11,7 @@ from mri_resolution.extract_slices import create_submission_df
 
 
 def load_model(checkpoint_path="best.ckpt", device="cpu", base=32):
+    # Load model weights for inference.
     model = UNet3D(base=base).to(device)
     ckpt = torch.load(checkpoint_path, map_location=device)
     state = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
@@ -20,6 +21,7 @@ def load_model(checkpoint_path="best.ckpt", device="cpu", base=32):
 
 
 def _start_indices(dim, patch_size, stride):
+    # Generate sliding-window start indices with edge coverage.
     if dim <= patch_size:
         return [0]
     idxs = list(range(0, dim - patch_size + 1, stride))
@@ -29,6 +31,7 @@ def _start_indices(dim, patch_size, stride):
 
 
 def predict_volume(model, volume, patch_size=96, stride=48, device="cpu"):
+    # Run sliding-window inference and stitch patches by averaging overlaps.
     x_starts = _start_indices(volume.shape[0], patch_size, stride)
     y_starts = _start_indices(volume.shape[1], patch_size, stride)
     z_starts = _start_indices(volume.shape[2], patch_size, stride)
@@ -52,6 +55,7 @@ def predict_volume(model, volume, patch_size=96, stride=48, device="cpu"):
 
 
 def get_hf_template(hf_dir="mri_resolution/train/high_field"):
+    # Load a training HF volume as the resampling template.
     hf_dir = Path(hf_dir)
     hf_files = sorted(list(hf_dir.glob("*.nii")))
     if not hf_files:
@@ -60,6 +64,7 @@ def get_hf_template(hf_dir="mri_resolution/train/high_field"):
 
 
 def main():
+    # Resample test LF volumes, run inference, and write submission.csv.
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = load_model("best.ckpt", device=device, base=48)
 

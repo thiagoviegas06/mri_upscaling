@@ -5,6 +5,7 @@ import torch.nn.functional as F
 class DoubleConv(nn.Module):
     def __init__(self, in_ch, out_ch):
         super().__init__()
+        # Two 3D conv layers with normalization and activation.
         self.net = nn.Sequential(
             nn.Conv3d(in_ch, out_ch, 3, padding=1),
             nn.InstanceNorm3d(out_ch),
@@ -13,11 +14,14 @@ class DoubleConv(nn.Module):
             nn.InstanceNorm3d(out_ch),
             nn.LeakyReLU(0.1, inplace=True),
         )
-    def forward(self, x): return self.net(x)
+    def forward(self, x):
+        # Apply the double-conv block.
+        return self.net(x)
 
 class ResidualBlock(nn.Module):
     def __init__(self, in_ch, out_ch):
         super().__init__()
+        # Residual 3D conv block with optional channel-matching skip.
         self.conv1 = nn.Conv3d(in_ch, out_ch, 3, padding=1)
         self.norm1 = nn.InstanceNorm3d(out_ch)
         self.act1 = nn.LeakyReLU(0.1, inplace=True)
@@ -30,6 +34,7 @@ class ResidualBlock(nn.Module):
             self.skip = nn.Conv3d(in_ch, out_ch, 1)
 
     def forward(self, x):
+        # Residual forward: convs + skip connection.
         identity = x if self.skip is None else self.skip(x)
         out = self.act1(self.norm1(self.conv1(x)))
         out = self.norm2(self.conv2(out))
@@ -39,6 +44,7 @@ class ResidualBlock(nn.Module):
 class AttentionGate3D(nn.Module):
     def __init__(self, in_ch, gating_ch, inter_ch):
         super().__init__()
+        # Attention gate to filter skip features using decoder context.
         self.theta = nn.Conv3d(in_ch, inter_ch, 1, bias=False)
         self.phi = nn.Conv3d(gating_ch, inter_ch, 1, bias=False)
         self.psi = nn.Conv3d(inter_ch, 1, 1, bias=True)
@@ -47,6 +53,7 @@ class AttentionGate3D(nn.Module):
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, x, g):
+        # Compute attention mask and gate skip features.
         # x: skip connection, g: gating (decoder)
         theta_x = self.theta(x)
         phi_g = self.phi(g)
@@ -57,6 +64,7 @@ class AttentionGate3D(nn.Module):
 class UNet3D(nn.Module):
     def __init__(self, in_ch=1, out_ch=1, base=32):
         super().__init__()
+        # 3D U-Net with residual blocks and attention-gated skips.
         self.enc1 = ResidualBlock(in_ch, base)
         self.pool1 = nn.MaxPool3d(2)
         self.enc2 = ResidualBlock(base, base*2)
@@ -79,6 +87,7 @@ class UNet3D(nn.Module):
         self.out = nn.Conv3d(base, out_ch, 1)
 
     def forward(self, x):
+        # Encoder-decoder forward with attention-gated skip fusion.
         e1 = self.enc1(x)
         e2 = self.enc2(self.pool1(e1))
         e3 = self.enc3(self.pool2(e2))

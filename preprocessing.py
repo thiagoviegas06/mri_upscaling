@@ -8,11 +8,13 @@ from nibabel.processing import resample_from_to
 
 # ---------- preprocessing ----------
 def preprocess_volume(volume, clip_percentiles=(1, 99), eps=1e-8):
+    # Clip extreme intensities and scale to [0, 1] for stable training.
     lo, hi = np.percentile(volume, clip_percentiles)
     volume = np.clip(volume, lo, hi)
     return ((volume - lo) / (hi - lo + eps)).astype(np.float32)
 
 def load_pair_resample_normalize(lf_path, hf_path, interp_order=1):
+    # Load LF/HF volumes, resample LF to HF grid, and normalize both.
     lf_img = nib.load(lf_path)
     hf_img = nib.load(hf_path)
 
@@ -27,6 +29,7 @@ def load_pair_resample_normalize(lf_path, hf_path, interp_order=1):
     return lf, hf  # numpy arrays, same shape (179,221,200)
 
 def random_patch_coords(vol_shape, patch_size, mask=None, min_foreground_ratio=0.05, max_tries=20):
+    # Randomly sample patch coordinates, optionally biasing toward tissue via a mask.
     # vol_shape: (X,Y,Z)
     x_max = vol_shape[0] - patch_size
     y_max = vol_shape[1] - patch_size
@@ -46,10 +49,12 @@ def random_patch_coords(vol_shape, patch_size, mask=None, min_foreground_ratio=0
     return x, y, z
 
 def compute_foreground_mask(volume, percentile=20):
+    # Build a simple tissue mask using a percentile intensity threshold.
     thresh = np.percentile(volume, percentile)
     return volume > thresh
 
 def extract_patch(vol, x, y, z, patch_size):
+    # Extract a cubic patch from a 3D volume.
     return vol[x:x+patch_size, y:y+patch_size, z:z+patch_size]
 
 # ---------- dataset ----------
@@ -82,6 +87,7 @@ class MRIPatchDataset(Dataset):
         return self._length
 
     def _get_volume_pair(self, vol_idx):
+        # Load (and cache) the LF/HF volume pair and optional tissue mask.
         if self.cache_volumes and vol_idx in self._cache:
             return self._cache[vol_idx]
 
@@ -96,6 +102,7 @@ class MRIPatchDataset(Dataset):
         return lf, hf, mask
 
     def __getitem__(self, idx):
+        # Sample a tissue-biased patch and return LF/HF tensors.
         vol_idx = idx // self.patches_per_volume
         lf, hf, mask = self._get_volume_pair(vol_idx)
 
