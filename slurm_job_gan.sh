@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=train_model
+#SBATCH --job-name=train_gan_model
 #SBATCH --account=torch_pr_60_tandon_priority
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
