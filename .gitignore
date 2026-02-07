@@ -1,3 +1,4 @@
 mri_resolution/
 .kaggle/
 submission.csv
+__pycache__/
