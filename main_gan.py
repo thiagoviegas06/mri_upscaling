@@ -57,11 +57,15 @@ if __name__ == "__main__":
     val_loader   = DataLoader(val_ds,   batch_size=2, shuffle=False, num_workers=2, pin_memory=True)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    # --- Generator Setup ---
     model = UNet3D(base=48).to(device)
-    discriminator = Discriminator3D(in_ch=1, base=48).to(device)
-    optim = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-4)
+    optim_g = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-4)
+    scaler_g = GradScaler("cuda") if device == "cuda" else None
+
+    # --- Discriminator Setup ---
+    discriminator = Discriminator3D().to(device)
     optim_d = torch.optim.AdamW(discriminator.parameters(), lr=1e-4, betas=(0.5, 0.999))
-    scaler = GradScaler("cuda") if device == "cuda" else None
+    scaler_d = GradScaler("cuda") if device == "cuda" else None
 
     best_val = float("inf")
     save_dir = os.environ.get("MODEL_DESTINATION", "checkpoints")
@@ -78,7 +82,17 @@ if __name__ == "__main__":
     val_full_max_volumes = 2
 
     for epoch in range(1, pretrain_epochs + 1):
-        train_metrics = train_one_epoch_gan(model, discriminator, train_loader, optim, optim_d, device, scaler, loss_weights=pretrain_weights)
+        train_metrics = train_one_epoch_gan(
+            model, 
+            discriminator, 
+            train_loader, 
+            optim_g, 
+            optim_d, 
+            device, 
+            scaler_g, 
+            scaler_d, 
+            loss_weights=pretrain_weights
+        )
         val_metrics   = validate(model, val_loader, device, loss_weights=pretrain_weights)
 
         if not torch.isfinite(torch.tensor(train_metrics["loss"])) or train_metrics["loss"] > 5.0:
@@ -113,13 +127,23 @@ if __name__ == "__main__":
         if val_metrics["loss"] < best_val:
             best_val = val_metrics["loss"]
             torch.save(
-                {"epoch": epoch, "model": model.state_dict(), "optim": optim.state_dict(), "val_loss": val_metrics["loss"]},
+                {"epoch": epoch, "model": model.state_dict(), "optim": optim_g.state_dict(), "val_loss": val_metrics["loss"]},
                 best_path
             )
             print("Saved best to:", best_path)
 
     for epoch in range(1, finetune_epochs + 1):
-        train_metrics = train_one_epoch_gan(model, discriminator, train_loader, optim, optim_d, device, scaler, loss_weights=finetune_weights)
+        train_metrics = train_metrics = train_one_epoch_gan(
+            model, 
+            discriminator, 
+            train_loader, 
+            optim_g, 
+            optim_d, 
+            device, 
+            scaler_g, 
+            scaler_d, 
+            loss_weights=finetune_weights
+        )
         val_metrics   = validate(model, val_loader, device, loss_weights=finetune_weights)
 
         if not torch.isfinite(torch.tensor(train_metrics["loss"])) or train_metrics["loss"] > 5.0:
@@ -154,7 +178,7 @@ if __name__ == "__main__":
         if val_metrics["loss"] < best_val:
             best_val = val_metrics["loss"]
             torch.save(
-                {"epoch": pretrain_epochs + epoch, "model": model.state_dict(), "optim": optim.state_dict(), "val_loss": val_metrics["loss"]},
+                {"epoch": pretrain_epochs + epoch, "model": model.state_dict(), "optim": optim_g.state_dict(), "val_loss": val_metrics["loss"]},
                 best_path
             )
             print("Saved best to:", best_path)
