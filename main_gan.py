@@ -95,7 +95,8 @@ if __name__ == "__main__":
         )
         val_metrics   = validate(model, val_loader, device, loss_weights=pretrain_weights)
 
-        if not torch.isfinite(torch.tensor(train_metrics["loss"])) or train_metrics["loss"] > 5.0:
+        train_loss = train_metrics.get("loss", train_metrics.get("g_loss", float("inf")))
+        if not torch.isfinite(torch.tensor(train_loss)) or train_loss > 5.0:
             print("Stopping: training loss exploded.")
             break
 
@@ -133,7 +134,7 @@ if __name__ == "__main__":
             print("Saved best to:", best_path)
 
     for epoch in range(1, finetune_epochs + 1):
-        train_metrics = train_metrics = train_one_epoch_gan(
+        train_metrics = train_one_epoch_gan(
             model, 
             discriminator, 
             train_loader, 
@@ -146,7 +147,8 @@ if __name__ == "__main__":
         )
         val_metrics   = validate(model, val_loader, device, loss_weights=finetune_weights)
 
-        if not torch.isfinite(torch.tensor(train_metrics["loss"])) or train_metrics["loss"] > 5.0:
+        train_loss = train_metrics.get("loss", train_metrics.get("g_loss", float("inf")))
+        if not torch.isfinite(torch.tensor(train_loss)) or train_loss > 5.0:
             print("Stopping: training loss exploded.")
             break
 
