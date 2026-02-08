@@ -189,6 +189,8 @@ def validate_full_volume(model, pairs, device, loss_weights=None, patch_size=96,
     if loss_weights is None:
         loss_weights = {"l1": 1.0, "l2": 0.0, "ssim": 1.0}
 
+    param_dtype = next(model.parameters()).dtype
+
     running = 0.0
     l1_running = 0.0
     l2_running = 0.0
