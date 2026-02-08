@@ -1,12 +1,13 @@
 #!/bin/bash
-#SBATCH --job-name=train_gan_model
+#SBATCH --job-name=train_model
 #SBATCH --account=torch_pr_60_tandon_priority
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --time=48:00:00
 #SBATCH --mem=32GB
-#SBATCH --gres=gpu:a100:1
+#SBATCH --partition=h200_tandon
+#SBATCH --gres=gpu:h200:1
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
 #SBATCH --mail-type=END
