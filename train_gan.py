@@ -101,9 +101,12 @@ def train_one_epoch_gan(generator, discriminator, loader, opt_g, opt_d, device, 
     # Loss functions
     adversarial_criterion = torch.nn.MSELoss() # LSGAN
     
+    param_dtype = next(generator.parameters()).dtype
+    use_amp = device == "cuda"
+
     for lf, hf in loader:
-        lf = lf.to(device, non_blocking=True)
-        hf = hf.to(device, non_blocking=True)
+        lf = lf.to(device=device, dtype=param_dtype, non_blocking=True)
+        hf = hf.to(device=device, dtype=param_dtype, non_blocking=True)
 
         # Ensure 5D tensors: (N, C, D, H, W)
         if lf.dim() == 4:
@@ -111,8 +114,8 @@ def train_one_epoch_gan(generator, discriminator, loader, opt_g, opt_d, device, 
         if hf.dim() == 4:
             hf = hf.unsqueeze(1)
 
-        lf = lf.contiguous().float()
-        hf = hf.contiguous().float()
+        lf = lf.contiguous()
+        hf = hf.contiguous()
 
         # ---------------------
         #  Train Discriminator
@@ -120,7 +123,7 @@ def train_one_epoch_gan(generator, discriminator, loader, opt_g, opt_d, device, 
         opt_d.zero_grad(set_to_none=True)
         
         # Use Automatic Mixed Precision (AMP) for speed/memory if available
-        amp_ctx = autocast(device_type="cuda") if device == "cuda" else contextlib.nullcontext()
+        amp_ctx = autocast(device_type="cuda") if use_amp else contextlib.nullcontext()
         with amp_ctx:
             # 1. Real: D(HF) should be close to 1
             pred_real = discriminator(hf)
@@ -135,9 +138,13 @@ def train_one_epoch_gan(generator, discriminator, loader, opt_g, opt_d, device, 
             loss_d = 0.5 * (loss_d_real + loss_d_fake)
 
         # Backward D
-        scaler_d.scale(loss_d).backward()
-        scaler_d.step(opt_d)
-        scaler_d.update()
+        if scaler_d is not None and use_amp:
+            scaler_d.scale(loss_d).backward()
+            scaler_d.step(opt_d)
+            scaler_d.update()
+        else:
+            loss_d.backward()
+            opt_d.step()
 
         # -----------------
         #  Train Generator
@@ -162,9 +169,13 @@ def train_one_epoch_gan(generator, discriminator, loader, opt_g, opt_d, device, 
             loss_g = (0.01 * loss_g_adv) + loss_content
 
         # Backward G
-        scaler_g.scale(loss_g).backward()
-        scaler_g.step(opt_g)
-        scaler_g.update()
+        if scaler_g is not None and use_amp:
+            scaler_g.scale(loss_g).backward()
+            scaler_g.step(opt_g)
+            scaler_g.update()
+        else:
+            loss_g.backward()
+            opt_g.step()
 
         running_d_loss += loss_d.item()
         running_g_loss += loss_g.item()
@@ -194,9 +205,19 @@ def validate(model, loader, device, loss_weights=None):
     if loss_weights is None:
         loss_weights = {"l1": 1.0, "l2": 0.0, "ssim": 1.0}
 
+    param_dtype = next(model.parameters()).dtype
+
     for lf, hf in loader:
-        lf = lf.to(device, non_blocking=True)
-        hf = hf.to(device, non_blocking=True)
+        lf = lf.to(device=device, dtype=param_dtype, non_blocking=True)
+        hf = hf.to(device=device, dtype=param_dtype, non_blocking=True)
+
+        if lf.dim() == 4:
+            lf = lf.unsqueeze(1)
+        if hf.dim() == 4:
+            hf = hf.unsqueeze(1)
+
+        lf = lf.contiguous()
+        hf = hf.contiguous()
 
         amp_ctx = autocast(device_type="cuda") if device == "cuda" else contextlib.nullcontext()
         with amp_ctx:
@@ -231,12 +252,14 @@ def validate_full_volume(model, pairs, device, loss_weights=None, patch_size=96,
     ssim_running = 0.0
     count = 0
 
+    param_dtype = next(model.parameters()).dtype
+
     for lf_path, hf_path in pairs:
         lf, hf = load_pair_resample_normalize(lf_path, hf_path, interp_order=1)
         pred = _predict_volume(model, lf, patch_size=patch_size, stride=stride, device=device)
 
-        pred_t = torch.from_numpy(pred)[None, None, ...].to(device)
-        hf_t = torch.from_numpy(hf)[None, None, ...].to(device)
+        pred_t = torch.from_numpy(pred)[None, None, ...].to(device=device, dtype=param_dtype)
+        hf_t = torch.from_numpy(hf)[None, None, ...].to(device=device, dtype=param_dtype)
         l1, l2, ssim = _compute_loss_parts(pred_t, hf_t)
         loss = (loss_weights["l1"] * l1) + (loss_weights["l2"] * l2) + (loss_weights["ssim"] * (1.0 - ssim))
 
