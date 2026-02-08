@@ -17,7 +17,7 @@ set -euo pipefail
 
 mkdir -p logs
 
-export MODEL_DESTINATION="/scratch/tjv235/pytorch-example/mri-upscaling/checkpoints"
+export MODEL_DESTINATION="/scratch/tjv235/pytorch-example/mri_upscaling/checkpoints"
 mkdir -p "${MODEL_DESTINATION}"
 
 # Threading (good defaults)
@@ -38,8 +38,8 @@ set -euo pipefail
 source /ext3/env.sh
 conda activate py311
 
-export MODEL_DESTINATION="/scratch/tjv235/pytorch-example/mri-upscaling/checkpoints"
+export MODEL_DESTINATION="/scratch/tjv235/pytorch-example/mri_upscaling/checkpoints"
 
-cd /scratch/tjv235/pytorch-example/mri-upscaling/
+cd /scratch/tjv235/pytorch-example/mri_upscaling/
 python -u main_gan.py
 EOF
