@@ -57,6 +57,25 @@ def extract_patch(vol, x, y, z, patch_size):
     # Extract a cubic patch from a 3D volume.
     return vol[x:x+patch_size, y:y+patch_size, z:z+patch_size]
 
+def apply_augmentations(lf_patch, hf_patch, flip_prob=0.5, noise_std=0.01, intensity_jitter=0.05):
+    # Apply simple 3D augmentations consistently to LF/HF patches.
+    # Random flips
+    for axis in (0, 1, 2):
+        if random.random() < flip_prob:
+            lf_patch = np.flip(lf_patch, axis=axis)
+            hf_patch = np.flip(hf_patch, axis=axis)
+
+    # Intensity jitter (same scale for LF/HF to preserve correspondence)
+    scale = 1.0 + random.uniform(-intensity_jitter, intensity_jitter)
+    lf_patch = np.clip(lf_patch * scale, 0.0, 1.0)
+    hf_patch = np.clip(hf_patch * scale, 0.0, 1.0)
+
+    # Add small Gaussian noise to LF only
+    if noise_std > 0:
+        lf_patch = np.clip(lf_patch + np.random.normal(0.0, noise_std, size=lf_patch.shape), 0.0, 1.0)
+
+    return lf_patch, hf_patch
+
 # ---------- dataset ----------
 class MRIPatchDataset(Dataset):
     """
@@ -64,7 +83,8 @@ class MRIPatchDataset(Dataset):
     Each __getitem__ picks a random patch from one subject volume.
     """
     def __init__(self, pairs, patch_size=96, patches_per_volume=64, cache_volumes=True,
-                 tissue_sampling=True, foreground_percentile=20, min_foreground_ratio=0.05, max_tries=20):
+                 tissue_sampling=True, foreground_percentile=20, min_foreground_ratio=0.05, max_tries=20,
+                 augment=True, flip_prob=0.5, noise_std=0.01, intensity_jitter=0.05):
         """
         pairs: list of (lf_path, hf_path)
         patches_per_volume: how many patches to draw per volume per epoch
@@ -78,6 +98,10 @@ class MRIPatchDataset(Dataset):
         self.foreground_percentile = foreground_percentile
         self.min_foreground_ratio = min_foreground_ratio
         self.max_tries = max_tries
+        self.augment = augment
+        self.flip_prob = flip_prob
+        self.noise_std = noise_std
+        self.intensity_jitter = intensity_jitter
         self._cache = {}  # idx -> (lf_np, hf_np)
 
         # Make dataset length = number of "patch samples" per epoch
@@ -115,6 +139,15 @@ class MRIPatchDataset(Dataset):
         )
         lf_p = extract_patch(lf, x, y, z, self.patch_size)
         hf_p = extract_patch(hf, x, y, z, self.patch_size)
+
+        if self.augment:
+            lf_p, hf_p = apply_augmentations(
+                lf_p,
+                hf_p,
+                flip_prob=self.flip_prob,
+                noise_std=self.noise_std,
+                intensity_jitter=self.intensity_jitter,
+            )
 
         # to torch: (C, X, Y, Z)
         lf_t = torch.from_numpy(lf_p)[None, ...]

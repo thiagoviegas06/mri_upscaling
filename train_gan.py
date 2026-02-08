@@ -94,6 +94,9 @@ def train_one_epoch_gan(generator, discriminator, loader, opt_g, opt_d, device, 
     
     running_g_loss = 0.0
     running_d_loss = 0.0
+    running_l1 = 0.0
+    running_l2 = 0.0
+    running_ssim = 0.0
     
     # Loss functions
     adversarial_criterion = torch.nn.MSELoss() # LSGAN
@@ -108,7 +111,8 @@ def train_one_epoch_gan(generator, discriminator, loader, opt_g, opt_d, device, 
         opt_d.zero_grad(set_to_none=True)
         
         # Use Automatic Mixed Precision (AMP) for speed/memory if available
-        with torch.amp.autocast("cuda"):
+        amp_ctx = autocast(device_type="cuda") if device == "cuda" else contextlib.nullcontext()
+        with amp_ctx:
             # 1. Real: D(HF) should be close to 1
             pred_real = discriminator(hf)
             loss_d_real = adversarial_criterion(pred_real, torch.ones_like(pred_real))
@@ -131,7 +135,7 @@ def train_one_epoch_gan(generator, discriminator, loader, opt_g, opt_d, device, 
         # -----------------
         opt_g.zero_grad(set_to_none=True)
         
-        with torch.amp.autocast("cuda"):
+        with amp_ctx:
             # We need to re-compute discriminator output for the fake volume, 
             # this time *without* detaching, so gradients flow to Generator.
             pred_fake_g = discriminator(fake_vol)
@@ -155,11 +159,18 @@ def train_one_epoch_gan(generator, discriminator, loader, opt_g, opt_d, device, 
 
         running_d_loss += loss_d.item()
         running_g_loss += loss_g.item()
+        running_l1 += l1.item()
+        running_l2 += l2.item()
+        running_ssim += ssim.item()
 
     denom = max(1, len(loader))
     return {
+        "loss": running_g_loss / denom,
         "g_loss": running_g_loss / denom,
-        "d_loss": running_d_loss / denom
+        "d_loss": running_d_loss / denom,
+        "l1": running_l1 / denom,
+        "l2": running_l2 / denom,
+        "ssim": running_ssim / denom,
     }
 
 @torch.no_grad()

@@ -31,6 +31,7 @@ OVL="/scratch/tjv235/pytorch-example/neuro.ext3"
 
 singularity exec --nv \
   --overlay "$OVL" \
+  --fakeroot \
   --bind /scratch:/scratch \
   "$SIF" /bin/bash <<'EOF'
 set -euo pipefail
