@@ -111,8 +111,8 @@ def train_one_epoch_gan(generator, discriminator, loader, opt_g, opt_d, device, 
         if hf.dim() == 4:
             hf = hf.unsqueeze(1)
 
-        lf = lf.contiguous()
-        hf = hf.contiguous()
+        lf = lf.contiguous().float()
+        hf = hf.contiguous().float()
 
         # ---------------------
         #  Train Discriminator
