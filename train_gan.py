@@ -105,6 +105,15 @@ def train_one_epoch_gan(generator, discriminator, loader, opt_g, opt_d, device, 
         lf = lf.to(device, non_blocking=True)
         hf = hf.to(device, non_blocking=True)
 
+        # Ensure 5D tensors: (N, C, D, H, W)
+        if lf.dim() == 4:
+            lf = lf.unsqueeze(1)
+        if hf.dim() == 4:
+            hf = hf.unsqueeze(1)
+
+        lf = lf.contiguous()
+        hf = hf.contiguous()
+
         # ---------------------
         #  Train Discriminator
         # ---------------------
