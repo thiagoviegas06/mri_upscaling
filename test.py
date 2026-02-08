@@ -32,6 +32,7 @@ def _start_indices(dim, patch_size, stride):
 
 def predict_volume(model, volume, patch_size=96, stride=48, device="cpu"):
     # Run sliding-window inference and stitch patches by averaging overlaps.
+    param_dtype = next(model.parameters()).dtype
     x_starts = _start_indices(volume.shape[0], patch_size, stride)
     y_starts = _start_indices(volume.shape[1], patch_size, stride)
     z_starts = _start_indices(volume.shape[2], patch_size, stride)
@@ -44,7 +45,7 @@ def predict_volume(model, volume, patch_size=96, stride=48, device="cpu"):
             for y in y_starts:
                 for z in z_starts:
                     patch = volume[x:x + patch_size, y:y + patch_size, z:z + patch_size]
-                    patch_t = torch.from_numpy(patch)[None, None, ...].to(device)
+                    patch_t = torch.from_numpy(patch)[None, None, ...].to(device=device, dtype=param_dtype)
                     pred_t = model(patch_t)
                     pred = pred_t.squeeze(0).squeeze(0).cpu().numpy()
 

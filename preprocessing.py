@@ -150,6 +150,6 @@ class MRIPatchDataset(Dataset):
             )
 
         # to torch: (C, X, Y, Z)
-        lf_t = torch.from_numpy(lf_p)[None, ...]
-        hf_t = torch.from_numpy(hf_p)[None, ...]
+        lf_t = torch.from_numpy(lf_p).float()[None, ...]
+        hf_t = torch.from_numpy(hf_p).float()[None, ...]
         return lf_t, hf_t

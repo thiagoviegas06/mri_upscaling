@@ -66,7 +66,7 @@ def _start_indices(dim, patch_size, stride):
     return idxs
 
 @torch.no_grad()
-def _predict_volume(model, volume, patch_size=96, stride=48, device="cpu"):
+def _predict_volume(model, volume, patch_size=96, stride=48, device="cpu", dtype=None):
     # Run sliding-window inference and stitch patches by averaging overlaps.
     x_starts = _start_indices(volume.shape[0], patch_size, stride)
     y_starts = _start_indices(volume.shape[1], patch_size, stride)
@@ -79,7 +79,11 @@ def _predict_volume(model, volume, patch_size=96, stride=48, device="cpu"):
         for y in y_starts:
             for z in z_starts:
                 patch = volume[x:x + patch_size, y:y + patch_size, z:z + patch_size]
-                patch_t = torch.from_numpy(patch)[None, None, ...].to(device)
+                patch_t = torch.from_numpy(patch)[None, None, ...]
+                if dtype is not None:
+                    patch_t = patch_t.to(device=device, dtype=dtype)
+                else:
+                    patch_t = patch_t.to(device=device)
                 pred_t = model(patch_t)
                 pred = pred_t.squeeze(0).squeeze(0).cpu().numpy()
 
@@ -256,7 +260,7 @@ def validate_full_volume(model, pairs, device, loss_weights=None, patch_size=96,
 
     for lf_path, hf_path in pairs:
         lf, hf = load_pair_resample_normalize(lf_path, hf_path, interp_order=1)
-        pred = _predict_volume(model, lf, patch_size=patch_size, stride=stride, device=device)
+        pred = _predict_volume(model, lf, patch_size=patch_size, stride=stride, device=device, dtype=param_dtype)
 
         pred_t = torch.from_numpy(pred)[None, None, ...].to(device=device, dtype=param_dtype)
         hf_t = torch.from_numpy(hf)[None, None, ...].to(device=device, dtype=param_dtype)

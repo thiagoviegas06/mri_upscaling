@@ -80,10 +80,8 @@ if __name__ == "__main__":
     best_path = os.path.join(save_dir, "best.ckpt")
 
     pretrain_epochs = 50
-    finetune_epochs = 20
 
     pretrain_weights = {"l1": 1.0, "l2": 0.0, "ssim": 1.0}
-    finetune_weights = {"l1": 0.3, "l2": 0.5, "ssim": 0.2}
     
     val_full_every = 5
     val_full_max_volumes = 2
@@ -98,9 +96,9 @@ if __name__ == "__main__":
 
         msg = (
             f"pretrain {epoch:02d} | loss: {train_metrics['loss']:.5f} "
-            f"| l1: {train_metrics['l1']:.5f} | l2: {train_metrics['l2']:.5f} "
+            f"| l1: {train_metrics['l1']:.5f} "
             f"| ssim: {train_metrics['ssim']:.5f} | val: {val_metrics['loss']:.5f} "
-            f"| val_l1: {val_metrics['l1']:.5f} | val_l2: {val_metrics['l2']:.5f} "
+            f"| val_l1: {val_metrics['l1']:.5f} "
             f"| val_ssim: {val_metrics['ssim']:.5f}"
         )
         if epoch % val_full_every == 0:
@@ -116,7 +114,6 @@ if __name__ == "__main__":
             msg += (
                 f" | val_full: {val_full['loss']:.5f}"
                 f" | val_full_l1: {val_full['l1']:.5f}"
-                f" | val_full_l2: {val_full['l2']:.5f}"
                 f" | val_full_ssim: {val_full['ssim']:.5f}"
             )
         print(msg)
@@ -125,47 +122,6 @@ if __name__ == "__main__":
             best_val = val_metrics["loss"]
             torch.save(
                 {"epoch": epoch, "model": model.state_dict(), "optim": optim.state_dict(), "val_loss": val_metrics["loss"]},
-                best_path
-            )
-            print("Saved best to:", best_path)
-
-    for epoch in range(1, finetune_epochs + 1):
-        train_metrics = train_one_epoch(model, train_loader, optim, device, scaler, loss_weights=finetune_weights)
-        val_metrics   = validate(model, val_loader, device, loss_weights=finetune_weights)
-
-        if not torch.isfinite(torch.tensor(train_metrics["loss"])) or train_metrics["loss"] > 5.0:
-            print("Stopping: training loss exploded.")
-            break
-
-        msg = (
-            f"finetune {epoch:02d} | loss: {train_metrics['loss']:.5f} "
-            f"| l1: {train_metrics['l1']:.5f} | l2: {train_metrics['l2']:.5f} "
-            f"| ssim: {train_metrics['ssim']:.5f} | val: {val_metrics['loss']:.5f} "
-            f"| val_l1: {val_metrics['l1']:.5f} | val_l2: {val_metrics['l2']:.5f} "
-            f"| val_ssim: {val_metrics['ssim']:.5f}"
-        )
-        if epoch % val_full_every == 0:
-            val_full = validate_full_volume(
-                model,
-                val_pairs,
-                device,
-                loss_weights=finetune_weights,
-                patch_size=patch_size,
-                stride=patch_size // 2,
-                max_volumes=val_full_max_volumes,
-            )
-            msg += (
-                f" | val_full: {val_full['loss']:.5f}"
-                f" | val_full_l1: {val_full['l1']:.5f}"
-                f" | val_full_l2: {val_full['l2']:.5f}"
-                f" | val_full_ssim: {val_full['ssim']:.5f}"
-            )
-        print(msg)
-
-        if val_metrics["loss"] < best_val:
-            best_val = val_metrics["loss"]
-            torch.save(
-                {"epoch": pretrain_epochs + epoch, "model": model.state_dict(), "optim": optim.state_dict(), "val_loss": val_metrics["loss"]},
                 best_path
             )
             print("Saved best to:", best_path)
