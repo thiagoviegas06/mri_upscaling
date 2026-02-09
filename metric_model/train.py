@@ -6,6 +6,12 @@ import torch.nn.functional as F
 
 from preprocessing import load_pair_resample_normalize
 
+LOSS_WEIGHTS = {
+    "l1": 0.6,
+    "mse": 0.4,
+    "ssim": 0.3,
+}
+
 def _gaussian_kernel_1d(window_size, sigma, device, dtype):
     coords = torch.arange(window_size, device=device, dtype=dtype) - (window_size - 1) / 2
     kernel = torch.exp(-(coords ** 2) / (2 * sigma ** 2))
@@ -40,6 +46,12 @@ def ssim_3d(x, y, window_size=7, sigma=1.5, data_range=1.0):
 
     ssim_map = ((2 * mu_xy + c1) * (2 * sigma_xy + c2)) / ((mu_x2 + mu_y2 + c1) * (sigma_x2 + sigma_y2 + c2))
     return ssim_map.mean()
+
+def compute_loss(pred, target):
+    l1 = F.l1_loss(pred, target)
+    mse = F.mse_loss(pred, target)
+    ssim = ssim_3d(pred, target, data_range=1.0)
+    return LOSS_WEIGHTS["l1"] * l1 + LOSS_WEIGHTS["mse"] * mse + LOSS_WEIGHTS["ssim"] * (1.0 - ssim)
 
 def _normalize_2d(x):
     x_min = x.min()
@@ -121,9 +133,7 @@ def train_one_epoch(model, loader, optim, device, scaler):
         amp_ctx = autocast(device_type="cuda") if device == "cuda" else contextlib.nullcontext()
         with amp_ctx:
             pred = model(lf)
-            l1 = F.l1_loss(pred, hf)
-            ssim = ssim_3d(pred, hf, data_range=1.0)
-            loss = l1 + (1.0 - ssim)
+            loss = compute_loss(pred, hf)
 
         if scaler is not None and device == "cuda":
             scaler.scale(loss).backward()
@@ -149,9 +159,7 @@ def validate(model, loader, device):
         amp_ctx = autocast(device_type="cuda") if device == "cuda" else contextlib.nullcontext()
         with amp_ctx:
             pred = model(lf)
-            l1 = F.l1_loss(pred, hf)
-            ssim = ssim_3d(pred, hf, data_range=1.0)
-            loss = l1 + (1.0 - ssim)
+            loss = compute_loss(pred, hf)
 
         running += loss.item()
 

@@ -1,18 +1,11 @@
-from mri_resolution.extract_slices import (
-    load_nifti,
-    slice_to_base64,
-    base64_to_slice,
-    volume_to_submission_rows,
-    create_submission_df
-)
-
-import os, random
+import os
+import random
 import torch
 from torch.amp import GradScaler
 from torch.utils.data import DataLoader
 
-from model import UNet3D
-from train import train_one_epoch, validate, validate_metric
+from metric_model.model import UNet3D
+from metric_model.train import train_one_epoch, validate, validate_metric
 from preprocessing import MRIPatchDataset
 
 def make_pairs(lf_dir, hf_dir):
@@ -58,7 +51,7 @@ if __name__ == "__main__":
     scaler = GradScaler("cuda") if device == "cuda" else None
 
     best_val = float("-inf")
-    save_dir = os.environ.get("MODEL_DESTINATION", "checkpoints")
+    save_dir = os.environ.get("MODEL_DESTINATION_METRIC", "checkpoints_metric")
     os.makedirs(save_dir, exist_ok=True)
     best_path = os.path.join(save_dir, "best.ckpt")
 
@@ -91,7 +84,7 @@ if __name__ == "__main__":
             print("Saved epoch checkpoint to:", epoch_path)
 
         print(
-            f"epoch {epoch:02d} | train L1: {train_loss:.5f} | val L1: {val_loss:.5f} "
+            f"epoch {epoch:02d} | train loss: {train_loss:.5f} | val loss: {val_loss:.5f} "
             f"| val score: {val_score:.5f} (ssim {val_ssim:.5f}, psnr {val_psnr:.2f}, n={val_slices})"
         )
 

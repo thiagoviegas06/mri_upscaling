@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=train_model
+#SBATCH --job-name=eval_checkpoints
 #SBATCH --account=torch_pr_60_tandon_priority
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -17,6 +17,10 @@ set -euo pipefail
 mkdir -p logs
 
 export MODEL_DESTINATION="/scratch/tjv235/pytorch-example/mri-upscaling/checkpoints"
+
+CKPT_GLOB="${MODEL_DESTINATION}/*.pt"
+VAL_LF_DIR="/scratch/tjv235/pytorch-example/mri_upscaling/mri_resolution/train/low_field"
+VAL_HF_DIR="/scratch/tjv235/pytorch-example/mri_upscaling/mri_resolution/train/high_field"
 mkdir -p "${MODEL_DESTINATION}"
 
 # Threading (good defaults)
@@ -26,19 +30,22 @@ export OPENBLAS_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
 
 SIF="/share/apps/images/cuda12.1.1-cudnn8.9.0-devel-ubuntu22.04.2.sif"
-OVL="/scratch/tjv235/pytorch-example/neuro.ext3"
+OVL="/scratch/tjv235/neuro.ext3"
 
 singularity exec --nv \
   --overlay "$OVL" \
-  --fakeroot \
+  --bind /scratch:/scratch \
   "$SIF" /bin/bash <<'EOF'
 set -euo pipefail
 
 source /ext3/env.sh
 conda activate py311
 
-export MODEL_DESTINATION="/scratch/tjv235/pytorch-example/mri_upscaling/checkpoints"
+export MODEL_DESTINATION="/scratch/tjv235/pytorch-example/mri-upscaling/checkpoints"
 
-cd /scratch/tjv235/pytorch-example/mri_upscaling/
-python -u main.py
+cd /scratch/tjv235/pytorch-example/mri-upscaling/
+python -u eval_checkpoints.py \
+  --ckpt_glob "$CKPT_GLOB" \
+  --val_lf_dir "$VAL_LF_DIR" \
+  --val_hf_dir "$VAL_HF_DIR"
 EOF
