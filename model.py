@@ -103,4 +103,5 @@ class UNet3D(nn.Module):
         e1_g = self.att1(e1, d1)
         d1 = self.dec1(torch.cat([d1, e1_g], dim=1))
 
-        return self.out(d1)
+        # Residual prediction: model outputs correction added to input.
+        return x + self.out(d1)

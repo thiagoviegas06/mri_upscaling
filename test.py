@@ -47,6 +47,7 @@ def predict_volume(model, volume, patch_size=96, stride=48, device="cpu"):
                     patch = volume[x:x + patch_size, y:y + patch_size, z:z + patch_size]
                     patch_t = torch.from_numpy(patch)[None, None, ...].to(device=device, dtype=param_dtype)
                     pred_t = model(patch_t)
+                    pred_t = torch.clamp(pred_t, 0.0, 1.0)
                     pred = pred_t.squeeze(0).squeeze(0).cpu().numpy()
 
                     accum[x:x + patch_size, y:y + patch_size, z:z + patch_size] += pred
