@@ -7,6 +7,7 @@ from mri_resolution.extract_slices import (
 )
 
 import os, random
+import numpy as np
 import torch
 from torch.amp import GradScaler
 from torch.utils.data import DataLoader
@@ -37,6 +38,13 @@ def split_pairs(pairs, val_frac=0.2, seed=42):
     return pairs[n_val:], pairs[:n_val]
 
 if __name__ == "__main__":
+    seed = 42
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
     patch_size = 96
 
     pairs = make_pairs("mri_resolution/train/low_field", "mri_resolution/train/high_field")
@@ -61,7 +69,7 @@ if __name__ == "__main__":
     val_ds   = MRIPatchDataset(
         val_pairs,
         patch_size=patch_size,
-        patches_per_volume=16,
+        patches_per_volume=64,
         cache_volumes=True,
         augment=False,
     )
@@ -83,7 +91,7 @@ if __name__ == "__main__":
     finetune_epochs = 30
 
     pretrain_weights = {"l1": 1.0, "l2": 0.0, "ssim": 1.0}
-    finetune_weights = {"l1": 0.4, "l2": 0.4, "ssim": 0.2}
+    finetune_weights = {"l1": 0.35, "l2": 0.35, "ssim": 0.30}
     
     val_full_every = 5
     val_full_max_volumes = 2

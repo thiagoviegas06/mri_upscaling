@@ -30,9 +30,17 @@ def _start_indices(dim, patch_size, stride):
     return idxs
 
 
+def _hann_window_3d(patch_size):
+    # Create a 3D Hann window for smooth patch blending.
+    w = np.hanning(patch_size).astype(np.float32)
+    w3d = w[:, None, None] * w[None, :, None] * w[None, None, :]
+    return w3d / np.max(w3d)
+
+
 def predict_volume(model, volume, patch_size=96, stride=48, device="cpu"):
     # Run sliding-window inference and stitch patches by averaging overlaps.
     param_dtype = next(model.parameters()).dtype
+    win = _hann_window_3d(patch_size)
     x_starts = _start_indices(volume.shape[0], patch_size, stride)
     y_starts = _start_indices(volume.shape[1], patch_size, stride)
     z_starts = _start_indices(volume.shape[2], patch_size, stride)
@@ -50,8 +58,8 @@ def predict_volume(model, volume, patch_size=96, stride=48, device="cpu"):
                     pred_t = torch.clamp(pred_t, 0.0, 1.0)
                     pred = pred_t.squeeze(0).squeeze(0).cpu().numpy()
 
-                    accum[x:x + patch_size, y:y + patch_size, z:z + patch_size] += pred
-                    weight[x:x + patch_size, y:y + patch_size, z:z + patch_size] += 1.0
+                    accum[x:x + patch_size, y:y + patch_size, z:z + patch_size] += pred * win
+                    weight[x:x + patch_size, y:y + patch_size, z:z + patch_size] += win
 
     return accum / np.maximum(weight, 1e-8)
 

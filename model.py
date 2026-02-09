@@ -19,13 +19,14 @@ class DoubleConv(nn.Module):
         return self.net(x)
 
 class ResidualBlock(nn.Module):
-    def __init__(self, in_ch, out_ch):
+    def __init__(self, in_ch, out_ch, kernel_size=(3, 3, 3)):
         super().__init__()
         # Residual 3D conv block with optional channel-matching skip.
-        self.conv1 = nn.Conv3d(in_ch, out_ch, 3, padding=1)
+        padding = tuple(k // 2 for k in kernel_size)
+        self.conv1 = nn.Conv3d(in_ch, out_ch, kernel_size, padding=padding)
         self.norm1 = nn.InstanceNorm3d(out_ch)
         self.act1 = nn.LeakyReLU(0.1, inplace=True)
-        self.conv2 = nn.Conv3d(out_ch, out_ch, 3, padding=1)
+        self.conv2 = nn.Conv3d(out_ch, out_ch, kernel_size, padding=padding)
         self.norm2 = nn.InstanceNorm3d(out_ch)
         self.act2 = nn.LeakyReLU(0.1, inplace=True)
 
@@ -65,7 +66,7 @@ class UNet3D(nn.Module):
     def __init__(self, in_ch=1, out_ch=1, base=32):
         super().__init__()
         # 3D U-Net with residual blocks and attention-gated skips.
-        self.enc1 = ResidualBlock(in_ch, base)
+        self.enc1 = ResidualBlock(in_ch, base, kernel_size=(3, 3, 1))
         self.pool1 = nn.MaxPool3d(2)
         self.enc2 = ResidualBlock(base, base*2)
         self.pool2 = nn.MaxPool3d(2)
