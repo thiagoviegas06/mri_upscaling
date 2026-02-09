@@ -61,10 +61,7 @@ if __name__ == "__main__":
         patch_size=patch_size,
         patches_per_volume=64,
         cache_volumes=True,
-        augment=True,
-        flip_prob=0.5,
-        noise_std=0.01,
-        intensity_jitter=0.05,
+        augment=False,
     )
     val_ds   = MRIPatchDataset(
         val_pairs,
@@ -72,6 +69,8 @@ if __name__ == "__main__":
         patches_per_volume=64,
         cache_volumes=True,
         augment=False,
+        deterministic_val=True,
+        val_seed=seed,
     )
 
     train_loader = DataLoader(train_ds, batch_size=2, shuffle=True,  num_workers=4, pin_memory=True)
@@ -87,13 +86,14 @@ if __name__ == "__main__":
     os.makedirs(save_dir, exist_ok=True)
     best_path = os.path.join(save_dir, "best.ckpt")
 
-    pretrain_epochs = 50
-    finetune_epochs = 30
+    pretrain_epochs = 80
+    finetune_epochs = 40
 
-    pretrain_weights = {"l1": 1.0, "l2": 0.0, "ssim": 1.0}
-    finetune_weights = {"l1": 0.35, "l2": 0.35, "ssim": 0.30}
+    pretrain_weights = {"l1": 1.0, "l2": 0.0, "ssim": 0.5}
+    finetune_weights = {"l1": 0.40, "l2": 0.20, "ssim": 0.40}
     
     val_full_every = 5
+    val_full_every_finetune = 1
     val_full_max_volumes = 2
 
     for epoch in range(1, pretrain_epochs + 1):
@@ -111,7 +111,7 @@ if __name__ == "__main__":
             f"| val_l1: {val_metrics['l1']:.5f} "
             f"| val_ssim: {val_metrics['ssim']:.5f}"
         )
-        if epoch % val_full_every == 0:
+        if epoch % val_full_every_finetune == 0:
             val_full = validate_full_volume(
                 model,
                 val_pairs,
@@ -137,6 +137,9 @@ if __name__ == "__main__":
             print("Saved best to:", best_path)
 
     for epoch in range(1, finetune_epochs + 1):
+        for param_group in optim.param_groups:
+            param_group["lr"] = 1e-5
+
         train_metrics = train_one_epoch(model, train_loader, optim, device, scaler, loss_weights=finetune_weights)
         val_metrics   = validate(model, val_loader, device, loss_weights=finetune_weights)
 

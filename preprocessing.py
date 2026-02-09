@@ -28,25 +28,50 @@ def load_pair_resample_normalize(lf_path, hf_path, interp_order=1):
 
     return lf, hf  # numpy arrays, same shape (179,221,200)
 
-def random_patch_coords(vol_shape, patch_size, mask=None, min_foreground_ratio=0.05, max_tries=20):
-    # Randomly sample patch coordinates, optionally biasing toward tissue via a mask.
+def random_patch_coords(
+    vol_shape,
+    patch_size,
+    mask=None,
+    min_foreground_ratio=0.05,
+    max_tries=20,
+    hf_volume=None,
+    min_std=None,
+    uniform_prob=0.3,
+):
+    # Randomly sample patch coordinates with optional tissue/texture bias.
     # vol_shape: (X,Y,Z)
     x_max = vol_shape[0] - patch_size
     y_max = vol_shape[1] - patch_size
     z_max = vol_shape[2] - patch_size
     if min(x_max, y_max, z_max) < 0:
         raise ValueError(f"Patch size {patch_size} too large for volume shape {vol_shape}")
-    x = y = z = 0
+
+    # Sometimes sample uniformly to keep coverage
+    if mask is None or random.random() < uniform_prob:
+        x = random.randint(0, x_max)
+        y = random.randint(0, y_max)
+        z = random.randint(0, z_max)
+        return x, y, z
+
+    last = (0, 0, 0)
     for _ in range(max_tries):
         x = random.randint(0, x_max)
         y = random.randint(0, y_max)
         z = random.randint(0, z_max)
-        if mask is None:
-            return x, y, z
+        last = (x, y, z)
+
         patch_mask = mask[x:x+patch_size, y:y+patch_size, z:z+patch_size]
-        if patch_mask.mean() >= min_foreground_ratio:
-            return x, y, z
-    return x, y, z
+        if patch_mask.mean() < min_foreground_ratio:
+            continue
+
+        if min_std is not None and hf_volume is not None:
+            patch_hf = hf_volume[x:x+patch_size, y:y+patch_size, z:z+patch_size]
+            if patch_hf.std() < min_std:
+                continue
+
+        return x, y, z
+
+    return last
 
 def compute_foreground_mask(volume, percentile=20):
     # Build a simple tissue mask using a percentile intensity threshold.
@@ -84,7 +109,9 @@ class MRIPatchDataset(Dataset):
     """
     def __init__(self, pairs, patch_size=96, patches_per_volume=64, cache_volumes=True,
                  tissue_sampling=True, foreground_percentile=20, min_foreground_ratio=0.05, max_tries=20,
-                 augment=True, flip_prob=0.5, noise_std=0.01, intensity_jitter=0.05):
+                 hf_std_min=None, uniform_prob=0.3,
+                 augment=True, flip_prob=0.5, noise_std=0.01, intensity_jitter=0.05,
+                 deterministic_val=False, val_seed=42):
         """
         pairs: list of (lf_path, hf_path)
         patches_per_volume: how many patches to draw per volume per epoch
@@ -98,17 +125,44 @@ class MRIPatchDataset(Dataset):
         self.foreground_percentile = foreground_percentile
         self.min_foreground_ratio = min_foreground_ratio
         self.max_tries = max_tries
+        self.hf_std_min = hf_std_min
+        self.uniform_prob = uniform_prob
         self.augment = augment
         self.flip_prob = flip_prob
         self.noise_std = noise_std
         self.intensity_jitter = intensity_jitter
+        self.deterministic_val = deterministic_val
+        self.val_seed = val_seed
         self._cache = {}  # idx -> (lf_np, hf_np)
+        self._val_coords = {}  # vol_idx -> list of (x,y,z)
 
         # Make dataset length = number of "patch samples" per epoch
         self._length = len(pairs) * patches_per_volume
 
     def __len__(self):
         return self._length
+
+    def _get_or_create_val_coords(self, vol_idx, vol_shape, mask, hf):
+        if vol_idx in self._val_coords:
+            return self._val_coords[vol_idx]
+
+        rng = random.Random(self.val_seed + vol_idx)
+        coords = []
+        for _ in range(self.patches_per_volume):
+            x, y, z = random_patch_coords(
+                vol_shape,
+                self.patch_size,
+                mask=mask,
+                min_foreground_ratio=self.min_foreground_ratio,
+                max_tries=self.max_tries,
+                hf_volume=hf,
+                min_std=self.hf_std_min,
+                uniform_prob=self.uniform_prob,
+            )
+            coords.append((x, y, z))
+
+        self._val_coords[vol_idx] = coords
+        return coords
 
     def _get_volume_pair(self, vol_idx):
         # Load (and cache) the LF/HF volume pair and optional tissue mask.
@@ -130,13 +184,21 @@ class MRIPatchDataset(Dataset):
         vol_idx = idx // self.patches_per_volume
         lf, hf, mask = self._get_volume_pair(vol_idx)
 
-        x, y, z = random_patch_coords(
-            lf.shape,
-            self.patch_size,
-            mask=mask,
-            min_foreground_ratio=self.min_foreground_ratio,
-            max_tries=self.max_tries,
-        )
+        if self.deterministic_val:
+            coords = self._get_or_create_val_coords(vol_idx, lf.shape, mask, hf)
+            patch_idx = idx % self.patches_per_volume
+            x, y, z = coords[patch_idx]
+        else:
+            x, y, z = random_patch_coords(
+                lf.shape,
+                self.patch_size,
+                mask=mask,
+                min_foreground_ratio=self.min_foreground_ratio,
+                max_tries=self.max_tries,
+                hf_volume=hf,
+                min_std=self.hf_std_min,
+                uniform_prob=self.uniform_prob,
+            )
         lf_p = extract_patch(lf, x, y, z, self.patch_size)
         hf_p = extract_patch(hf, x, y, z, self.patch_size)
 
