@@ -121,6 +121,7 @@ def train_one_epoch(model, loader, optim, device, scaler):
         amp_ctx = autocast(device_type="cuda") if device == "cuda" else contextlib.nullcontext()
         with amp_ctx:
             pred = model(lf)
+            pred = pred.clamp(0.0, 1.0)
             l1 = F.l1_loss(pred, hf)
             ssim = ssim_3d(pred, hf, data_range=1.0)
             loss = l1 + (1.0 - ssim)
@@ -149,6 +150,7 @@ def validate(model, loader, device):
         amp_ctx = autocast(device_type="cuda") if device == "cuda" else contextlib.nullcontext()
         with amp_ctx:
             pred = model(lf)
+            pred = pred.clamp(0.0, 1.0)
             l1 = F.l1_loss(pred, hf)
             ssim = ssim_3d(pred, hf, data_range=1.0)
             loss = l1 + (1.0 - ssim)
@@ -170,6 +172,7 @@ def validate_metric(model, pairs, device, patch_size=96, stride=48, max_volumes=
 
         lf, hf = load_pair_resample_normalize(lf_path, hf_path, interp_order=1)
         pred = predict_volume(model, lf, patch_size=patch_size, stride=stride, device=device)
+        pred = np.clip(pred, 0.0, 1.0)
 
         for z in range(0, hf.shape[2], slice_stride):
             gt_slice = hf[:, :, z]

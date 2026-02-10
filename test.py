@@ -75,7 +75,7 @@ def main():
         volume = lf_resampled.get_fdata().astype(np.float32)
         volume = preprocess_volume(volume)
 
-        pred = predict_volume(model, volume, patch_size=96, stride=48, device=device)
+        pred = predict_volume(model, volume, patch_size=96, stride=96 // 3, device=device)
         predictions[sample_id] = pred
 
     df = create_submission_df(predictions)
