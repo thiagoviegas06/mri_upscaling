@@ -55,7 +55,7 @@ class AttentionGate3D(nn.Module):
         return x * attn
 
 class UNet3D(nn.Module):
-    def __init__(self, in_ch=1, out_ch=1, base=32):
+    def __init__(self, in_ch=1, out_ch=1, base=32, dropout_p=0.1):
         super().__init__()
         self.enc1 = ResidualBlock(in_ch, base)
         self.pool1 = nn.MaxPool3d(2)
@@ -65,6 +65,7 @@ class UNet3D(nn.Module):
         self.pool3 = nn.MaxPool3d(2)
 
         self.bott = ResidualBlock(base*4, base*8)
+        self.bott_dropout = nn.Dropout3d(p=dropout_p)
 
         self.up3 = nn.ConvTranspose3d(base*8, base*4, 2, stride=2)
         self.att3 = AttentionGate3D(base*4, base*4, base*2)
@@ -83,6 +84,7 @@ class UNet3D(nn.Module):
         e2 = self.enc2(self.pool1(e1))
         e3 = self.enc3(self.pool2(e2))
         b  = self.bott(self.pool3(e3))
+        b  = self.bott_dropout(b)
 
         d3 = self.up3(b)
         e3_g = self.att3(e3, d3)
