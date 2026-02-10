@@ -132,6 +132,8 @@ class MRIPatchDataset(Dataset):
 
         if self.augment:
             lf_p, hf_p = _augment_pair(lf_p, hf_p)
+            lf_p = lf_p.copy()
+            hf_p = hf_p.copy()
 
         # to torch: (C, X, Y, Z)
         lf_t = torch.from_numpy(lf_p)[None, ...]
