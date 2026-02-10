@@ -27,7 +27,7 @@ export OPENBLAS_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
 
 SIF="/share/apps/images/cuda12.1.1-cudnn8.9.0-devel-ubuntu22.04.2.sif"
-OVL="/scratch/tjv235/pytorch-example/neuro.ext3"
+OVL="/scratch/tjv235/neuro.ext3"
 
 singularity exec --nv \
   --overlay "$OVL" \

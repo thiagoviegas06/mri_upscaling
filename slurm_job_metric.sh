@@ -1,16 +1,17 @@
 #!/bin/bash
-#SBATCH --job-name=train_model
+#SBATCH --job-name=metric_model
 #SBATCH --account=torch_pr_60_tandon_priority
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --time=48:00:00
 #SBATCH --mem=32GB
-#SBATCH --gres=gpu:a100:1
+#SBATCH --partition=h200_tandon
+#SBATCH --gres=gpu:h200:1
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
 #SBATCH --mail-type=END
-#SBATCH --mail-user=tjv235@nyu.edu
+#SBATCH --mail-user=tjv235@nyu.edu#!/bin/bash
 
 set -euo pipefail
 
@@ -26,7 +27,7 @@ export OPENBLAS_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
 
 SIF="/share/apps/images/cuda12.1.1-cudnn8.9.0-devel-ubuntu22.04.2.sif"
-OVL="/scratch/tjv235/pytorch-example/neuro.ext3"
+OVL="/scratch/tjv235/neuro.ext3"
 
 singularity exec --nv \
   --overlay "$OVL" \

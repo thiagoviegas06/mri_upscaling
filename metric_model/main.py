@@ -1,8 +1,15 @@
 import os
 import random
+import sys
+from pathlib import Path
+
 import torch
 from torch.amp import GradScaler
 from torch.utils.data import DataLoader
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from metric_model.model import UNet3D
 from metric_model.train import train_one_epoch, validate, validate_metric
