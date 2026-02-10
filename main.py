@@ -72,7 +72,7 @@ if __name__ == "__main__":
 
     best_val = float("-inf")
     best_epoch = 0
-    patience = 5
+    patience = 8
     epochs_no_improve = 0
     save_dir = os.environ.get("MODEL_DESTINATION", "checkpoints")
     os.makedirs(save_dir, exist_ok=True)
