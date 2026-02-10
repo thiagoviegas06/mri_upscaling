@@ -52,6 +52,7 @@ if __name__ == "__main__":
         patches_per_volume=64,
         cache_volumes=True,
         augment=True,
+        volume_augment=True,
     )
     val_ds   = MRIPatchDataset(val_pairs,   patch_size=patch_size, patches_per_volume=16, cache_volumes=True)
 

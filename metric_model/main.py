@@ -51,7 +51,7 @@ if __name__ == "__main__":
         patch_size=patch_size,
         patches_per_volume=64,
         cache_volumes=True,
-        augment=True,
+        volume_augment=True,
     )
     val_ds   = MRIPatchDataset(val_pairs,   patch_size=patch_size, patches_per_volume=16, cache_volumes=True)
 
@@ -72,13 +72,13 @@ if __name__ == "__main__":
 
     best_val = float("-inf")
     best_epoch = 0
-    patience = 8
+    patience = 12
     epochs_no_improve = 0
     save_dir = os.environ.get("MODEL_DESTINATION_METRIC", "checkpoints_metric")
     os.makedirs(save_dir, exist_ok=True)
     best_path = os.path.join(save_dir, "best.ckpt")
 
-    num_epochs = 35
+    num_epochs = 60
     for epoch in range(1, num_epochs + 1):
         train_loss = train_one_epoch(model, train_loader, optim, device, scaler)
         val_loss = validate(model, val_loader, device)

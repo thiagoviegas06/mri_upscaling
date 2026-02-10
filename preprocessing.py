@@ -71,6 +71,38 @@ def _augment_pair(lf_p, hf_p):
 
     return lf_p, hf_p
 
+def _augment_volume_pair(lf_v, hf_v, mask=None):
+    # Apply identical random flips and in-plane rotations to full volumes.
+    if random.random() < 0.5:
+        lf_v = lf_v[::-1, :, :]
+        hf_v = hf_v[::-1, :, :]
+        if mask is not None:
+            mask = mask[::-1, :, :]
+    if random.random() < 0.5:
+        lf_v = lf_v[:, ::-1, :]
+        hf_v = hf_v[:, ::-1, :]
+        if mask is not None:
+            mask = mask[:, ::-1, :]
+    if random.random() < 0.5:
+        lf_v = lf_v[:, :, ::-1]
+        hf_v = hf_v[:, :, ::-1]
+        if mask is not None:
+            mask = mask[:, :, ::-1]
+
+    k = random.randint(0, 3)
+    if k:
+        lf_v = np.rot90(lf_v, k, axes=(0, 1))
+        hf_v = np.rot90(hf_v, k, axes=(0, 1))
+        if mask is not None:
+            mask = np.rot90(mask, k, axes=(0, 1))
+
+    lf_v = lf_v.copy()
+    hf_v = hf_v.copy()
+    if mask is not None:
+        mask = mask.copy()
+
+    return lf_v, hf_v, mask
+
 # ---------- dataset ----------
 class MRIPatchDataset(Dataset):
     """
@@ -79,7 +111,7 @@ class MRIPatchDataset(Dataset):
     """
     def __init__(self, pairs, patch_size=96, patches_per_volume=64, cache_volumes=True,
                  tissue_sampling=True, foreground_percentile=20, min_foreground_ratio=0.05, max_tries=20,
-                 augment=False):
+                 augment=False, volume_augment=False):
         """
         pairs: list of (lf_path, hf_path)
         patches_per_volume: how many patches to draw per volume per epoch
@@ -94,6 +126,7 @@ class MRIPatchDataset(Dataset):
         self.min_foreground_ratio = min_foreground_ratio
         self.max_tries = max_tries
         self.augment = augment
+        self.volume_augment = volume_augment
         self._cache = {}  # idx -> (lf_np, hf_np)
 
         # Make dataset length = number of "patch samples" per epoch
@@ -119,6 +152,9 @@ class MRIPatchDataset(Dataset):
     def __getitem__(self, idx):
         vol_idx = idx // self.patches_per_volume
         lf, hf, mask = self._get_volume_pair(vol_idx)
+
+        if self.volume_augment:
+            lf, hf, mask = _augment_volume_pair(lf, hf, mask)
 
         x, y, z = random_patch_coords(
             lf.shape,
