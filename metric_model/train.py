@@ -7,9 +7,9 @@ import torch.nn.functional as F
 from preprocessing import load_pair_resample_normalize
 
 LOSS_WEIGHTS = {
-    "l1": 0.6,
-    "mse": 0.4,
-    "ssim": 0.3,
+    "l1": 0.3,
+    "mse": 0.5,
+    "ssim": 0.6,
 }
 
 def _gaussian_kernel_1d(window_size, sigma, device, dtype):

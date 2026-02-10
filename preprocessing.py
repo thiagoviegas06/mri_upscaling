@@ -52,6 +52,25 @@ def compute_foreground_mask(volume, percentile=20):
 def extract_patch(vol, x, y, z, patch_size):
     return vol[x:x+patch_size, y:y+patch_size, z:z+patch_size]
 
+def _augment_pair(lf_p, hf_p):
+    # Apply identical random flips and in-plane rotations to LF/HF patches.
+    if random.random() < 0.5:
+        lf_p = lf_p[::-1, :, :]
+        hf_p = hf_p[::-1, :, :]
+    if random.random() < 0.5:
+        lf_p = lf_p[:, ::-1, :]
+        hf_p = hf_p[:, ::-1, :]
+    if random.random() < 0.5:
+        lf_p = lf_p[:, :, ::-1]
+        hf_p = hf_p[:, :, ::-1]
+
+    k = random.randint(0, 3)
+    if k:
+        lf_p = np.rot90(lf_p, k, axes=(0, 1))
+        hf_p = np.rot90(hf_p, k, axes=(0, 1))
+
+    return lf_p, hf_p
+
 # ---------- dataset ----------
 class MRIPatchDataset(Dataset):
     """
@@ -59,7 +78,8 @@ class MRIPatchDataset(Dataset):
     Each __getitem__ picks a random patch from one subject volume.
     """
     def __init__(self, pairs, patch_size=96, patches_per_volume=64, cache_volumes=True,
-                 tissue_sampling=True, foreground_percentile=20, min_foreground_ratio=0.05, max_tries=20):
+                 tissue_sampling=True, foreground_percentile=20, min_foreground_ratio=0.05, max_tries=20,
+                 augment=False):
         """
         pairs: list of (lf_path, hf_path)
         patches_per_volume: how many patches to draw per volume per epoch
@@ -73,6 +93,7 @@ class MRIPatchDataset(Dataset):
         self.foreground_percentile = foreground_percentile
         self.min_foreground_ratio = min_foreground_ratio
         self.max_tries = max_tries
+        self.augment = augment
         self._cache = {}  # idx -> (lf_np, hf_np)
 
         # Make dataset length = number of "patch samples" per epoch
@@ -108,6 +129,9 @@ class MRIPatchDataset(Dataset):
         )
         lf_p = extract_patch(lf, x, y, z, self.patch_size)
         hf_p = extract_patch(hf, x, y, z, self.patch_size)
+
+        if self.augment:
+            lf_p, hf_p = _augment_pair(lf_p, hf_p)
 
         # to torch: (C, X, Y, Z)
         lf_t = torch.from_numpy(lf_p)[None, ...]

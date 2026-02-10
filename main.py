@@ -46,7 +46,13 @@ if __name__ == "__main__":
     if torch.cuda.is_available():
         print("GPU:", torch.cuda.get_device_name(0))
 
-    train_ds = MRIPatchDataset(train_pairs, patch_size=patch_size, patches_per_volume=64, cache_volumes=True)
+    train_ds = MRIPatchDataset(
+        train_pairs,
+        patch_size=patch_size,
+        patches_per_volume=64,
+        cache_volumes=True,
+        augment=True,
+    )
     val_ds   = MRIPatchDataset(val_pairs,   patch_size=patch_size, patches_per_volume=16, cache_volumes=True)
 
     train_loader = DataLoader(train_ds, batch_size=2, shuffle=True,  num_workers=4, pin_memory=True)
