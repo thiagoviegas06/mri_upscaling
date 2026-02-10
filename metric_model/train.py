@@ -47,11 +47,51 @@ def ssim_3d(x, y, window_size=7, sigma=1.5, data_range=1.0):
     ssim_map = ((2 * mu_xy + c1) * (2 * sigma_xy + c2)) / ((mu_x2 + mu_y2 + c1) * (sigma_x2 + sigma_y2 + c2))
     return ssim_map.mean()
 
+def _normalize_2d_torch(x, eps=1e-8):
+    x_min = x.amin(dim=(-2, -1), keepdim=True)
+    x_max = x.amax(dim=(-2, -1), keepdim=True)
+    return torch.where(x_max > x_min, (x - x_min) / (x_max - x_min + eps), torch.zeros_like(x))
+
+def ssim_2d_slices(x, y, axis):
+    # x, y: (N, C, D, H, W); axis in {2,3,4}
+    if axis == 2:  # axial (D)
+        x_s = x.permute(0, 1, 2, 3, 4)
+        y_s = y.permute(0, 1, 2, 3, 4)
+    elif axis == 3:  # coronal (H)
+        x_s = x.permute(0, 1, 3, 2, 4)
+        y_s = y.permute(0, 1, 3, 2, 4)
+    else:  # sagittal (W)
+        x_s = x.permute(0, 1, 4, 2, 3)
+        y_s = y.permute(0, 1, 4, 2, 3)
+
+    n, c, s, h, w = x_s.shape
+    x_s = x_s.reshape(n * c * s, h, w)
+    y_s = y_s.reshape(n * c * s, h, w)
+
+    x_norm = _normalize_2d_torch(x_s)
+    y_norm = _normalize_2d_torch(y_s)
+
+    mu_x = x_norm.mean(dim=(-2, -1))
+    mu_y = y_norm.mean(dim=(-2, -1))
+
+    sigma_x2 = ((x_norm - mu_x[:, None, None]) ** 2).mean(dim=(-2, -1))
+    sigma_y2 = ((y_norm - mu_y[:, None, None]) ** 2).mean(dim=(-2, -1))
+    sigma_xy = ((x_norm - mu_x[:, None, None]) * (y_norm - mu_y[:, None, None])).mean(dim=(-2, -1))
+
+    c1 = 0.01 ** 2
+    c2 = 0.03 ** 2
+    numerator = (2 * mu_x * mu_y + c1) * (2 * sigma_xy + c2)
+    denominator = (mu_x ** 2 + mu_y ** 2 + c1) * (sigma_x2 + sigma_y2 + c2)
+
+    return (numerator / denominator).mean()
+
 def compute_loss(pred, target):
     l1 = F.l1_loss(pred, target)
-    mse = F.mse_loss(pred, target)
-    ssim = ssim_3d(pred, target, data_range=1.0)
-    return LOSS_WEIGHTS["l1"] * l1 + LOSS_WEIGHTS["mse"] * mse + LOSS_WEIGHTS["ssim"] * (1.0 - ssim)
+    ssim_ax = ssim_2d_slices(pred, target, axis=2)
+    ssim_cor = ssim_2d_slices(pred, target, axis=3)
+    ssim_sag = ssim_2d_slices(pred, target, axis=4)
+    ssim_mean = (ssim_ax + ssim_cor + ssim_sag) / 3.0
+    return 0.4 * l1 + 0.6 * (1.0 - ssim_mean)
 
 def _normalize_2d(x):
     x_min = x.min()
