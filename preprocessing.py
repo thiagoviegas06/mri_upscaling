@@ -10,7 +10,9 @@ from nibabel.processing import resample_from_to
 def preprocess_volume(volume, clip_percentiles=(1, 99), eps=1e-8):
     lo, hi = np.percentile(volume, clip_percentiles)
     volume = np.clip(volume, lo, hi)
-    return ((volume - lo) / (hi - lo + eps)).astype(np.float32)
+    mean = volume.mean()
+    std = volume.std()
+    return ((volume - mean) / (std + eps)).astype(np.float32)
 
 def load_pair_resample_normalize(lf_path, hf_path, interp_order=1):
     lf_img = nib.load(lf_path)
