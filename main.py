@@ -12,7 +12,7 @@ from torch.amp import GradScaler
 from torch.utils.data import DataLoader
 
 from model import UNet3D
-from train import train_one_epoch, validate, validate_metric
+from train import EMA, train_one_epoch, validate, validate_metric
 from preprocessing import MRIPatchDataset
 
 def make_pairs(lf_dir, hf_dir):
@@ -70,6 +70,7 @@ if __name__ == "__main__":
         min_lr=1e-5,
     )
     scaler = GradScaler("cuda") if device == "cuda" else None
+    ema = EMA(model, decay=0.999)
 
     best_val = float("-inf")
     best_epoch = 0
@@ -81,7 +82,9 @@ if __name__ == "__main__":
 
     num_epochs = 35
     for epoch in range(1, num_epochs + 1):
-        train_loss = train_one_epoch(model, train_loader, optim, device, scaler)
+        train_loss = train_one_epoch(model, train_loader, optim, device, scaler, ema=ema)
+
+        ema_backup = ema.apply_to(model)
         val_loss = validate(model, val_loader, device)
         val_score, val_ssim, val_psnr, val_slices = validate_metric(
             model,
@@ -90,6 +93,7 @@ if __name__ == "__main__":
             patch_size=patch_size,
             stride=patch_size // 2,
         )
+        ema.restore(model, ema_backup)
 
         if epoch % 5 == 0:
             epoch_path = os.path.join(save_dir, f"epoch_{epoch:02d}.ckpt")
@@ -97,6 +101,7 @@ if __name__ == "__main__":
                 {
                     "epoch": epoch,
                     "model": model.state_dict(),
+                    "ema": ema.state_dict(),
                     "optim": optim.state_dict(),
                     "val_loss": val_loss,
                     "val_score": val_score,
@@ -122,6 +127,7 @@ if __name__ == "__main__":
                 {
                     "epoch": epoch,
                     "model": model.state_dict(),
+                    "ema": ema.state_dict(),
                     "optim": optim.state_dict(),
                     "val_loss": val_loss,
                     "val_score": val_score,

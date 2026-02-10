@@ -6,6 +6,33 @@ import torch.nn.functional as F
 
 from preprocessing import load_pair_resample_normalize
 
+
+class EMA:
+    def __init__(self, model, decay=0.999):
+        self.decay = decay
+        self.shadow = {k: v.detach().clone() for k, v in model.state_dict().items()}
+
+    def update(self, model):
+        for name, param in model.state_dict().items():
+            if name in self.shadow:
+                self.shadow[name].mul_(self.decay).add_(param.detach(), alpha=1.0 - self.decay)
+            else:
+                self.shadow[name] = param.detach().clone()
+
+    def apply_to(self, model):
+        backup = {k: v.detach().clone() for k, v in model.state_dict().items()}
+        model.load_state_dict(self.shadow, strict=False)
+        return backup
+
+    def restore(self, model, backup):
+        model.load_state_dict(backup, strict=False)
+
+    def state_dict(self):
+        return {k: v.clone() for k, v in self.shadow.items()}
+
+    def load_state_dict(self, state):
+        self.shadow = {k: v.clone() for k, v in state.items()}
+
 LOSS_WEIGHTS = {
     "l1": 0.3,
     "mse": 0.5,
@@ -160,7 +187,7 @@ def predict_volume(model, volume, patch_size=96, stride=48, device="cpu"):
 
     return accum / np.maximum(weight, 1e-8)
 
-def train_one_epoch(model, loader, optim, device, scaler):
+def train_one_epoch(model, loader, optim, device, scaler, ema=None):
     model.train()
     running = 0.0
 
@@ -173,7 +200,6 @@ def train_one_epoch(model, loader, optim, device, scaler):
         amp_ctx = autocast(device_type="cuda") if device == "cuda" else contextlib.nullcontext()
         with amp_ctx:
             pred = model(lf)
-            pred = pred.clamp(0.0, 1.0)
             loss = compute_loss(pred, hf)
 
         if scaler is not None and device == "cuda":
@@ -183,6 +209,9 @@ def train_one_epoch(model, loader, optim, device, scaler):
         else:
             loss.backward()
             optim.step()
+
+        if ema is not None:
+            ema.update(model)
 
         running += loss.item()
 
@@ -200,7 +229,6 @@ def validate(model, loader, device):
         amp_ctx = autocast(device_type="cuda") if device == "cuda" else contextlib.nullcontext()
         with amp_ctx:
             pred = model(lf)
-            pred = pred.clamp(0.0, 1.0)
             loss = compute_loss(pred, hf)
 
         running += loss.item()

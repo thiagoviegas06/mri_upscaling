@@ -13,10 +13,13 @@ from mri_resolution import metric as eval_metric
 from test import predict_volume
 
 
-def load_model(checkpoint_path, device="cpu", base=56):
+def load_model(checkpoint_path, device="cpu", base=56, use_ema=True):
     model = UNet3D(base=base).to(device)
     ckpt = torch.load(checkpoint_path, map_location=device)
-    state = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
+    if isinstance(ckpt, dict) and use_ema and "ema" in ckpt:
+        state = ckpt["ema"]
+    else:
+        state = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
     model.load_state_dict(state)
     model.eval()
     return model
