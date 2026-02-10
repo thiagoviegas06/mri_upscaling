@@ -55,14 +55,24 @@ if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = UNet3D(base=48).to(device)
     optim = torch.optim.AdamW(model.parameters(), lr=2e-4, weight_decay=1e-4)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optim,
+        mode="max",
+        factor=0.5,
+        patience=5,
+        min_lr=1e-5,
+    )
     scaler = GradScaler("cuda") if device == "cuda" else None
 
     best_val = float("-inf")
+    best_epoch = 0
+    patience = 5
+    epochs_no_improve = 0
     save_dir = os.environ.get("MODEL_DESTINATION", "checkpoints")
     os.makedirs(save_dir, exist_ok=True)
     best_path = os.path.join(save_dir, "best.ckpt")
 
-    num_epochs = 50
+    num_epochs = 35
     for epoch in range(1, num_epochs + 1):
         train_loss = train_one_epoch(model, train_loader, optim, device, scaler)
         val_loss = validate(model, val_loader, device)
@@ -95,8 +105,12 @@ if __name__ == "__main__":
             f"| val score: {val_score:.5f} (ssim {val_ssim:.5f}, psnr {val_psnr:.2f}, n={val_slices})"
         )
 
+        scheduler.step(val_score)
+
         if val_score > best_val:
             best_val = val_score
+            best_epoch = epoch
+            epochs_no_improve = 0
             torch.save(
                 {
                     "epoch": epoch,
@@ -110,3 +124,10 @@ if __name__ == "__main__":
                 best_path
             )
             print("Saved best to:", best_path)
+        else:
+            epochs_no_improve += 1
+            if epochs_no_improve >= patience:
+                print(
+                    f"Early stopping at epoch {epoch:02d} (best epoch {best_epoch:02d}, score {best_val:.5f})"
+                )
+                break
