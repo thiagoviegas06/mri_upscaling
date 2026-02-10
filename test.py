@@ -10,7 +10,7 @@ from preprocessing import preprocess_volume
 from mri_resolution.extract_slices import create_submission_df
 
 
-def load_model(checkpoint_path="best.ckpt", device="cpu", base=32):
+def load_model(checkpoint_path="best.ckpt", device="cpu", base=56):
     model = UNet3D(base=base).to(device)
     ckpt = torch.load(checkpoint_path, map_location=device)
     state = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
@@ -61,7 +61,7 @@ def get_hf_template(hf_dir="mri_resolution/train/high_field"):
 
 def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = load_model("best.ckpt", device=device, base=48)
+    model = load_model("best.ckpt", device=device, base=56)
 
     hf_template = get_hf_template()
 
