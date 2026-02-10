@@ -55,6 +55,7 @@ def build_submission_df(model, pairs, device, patch_size=96, stride=48):
         volume = preprocess_volume(volume)
 
         pred = predict_volume(model, volume, patch_size=patch_size, stride=stride, device=device)
+        pred = np.clip(pred, 0.0, 1.0)
         rows.extend(volume_to_submission_rows(pred, sample_id))
     return pd.DataFrame(rows)
 

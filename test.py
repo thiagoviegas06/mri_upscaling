@@ -76,6 +76,7 @@ def main():
         volume = preprocess_volume(volume)
 
         pred = predict_volume(model, volume, patch_size=96, stride=96 // 3, device=device)
+        pred = np.clip(pred, 0.0, 1.0)
         predictions[sample_id] = pred
 
     df = create_submission_df(predictions)
