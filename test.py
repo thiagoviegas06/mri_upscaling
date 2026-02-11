@@ -31,6 +31,15 @@ def _start_indices(dim, patch_size, stride):
     return idxs
 
 
+def _gaussian_window_3d(patch_size, sigma=None):
+    if sigma is None:
+        sigma = patch_size / 5.0
+    coords = np.arange(patch_size) - (patch_size - 1) / 2.0
+    g1d = np.exp(-(coords ** 2) / (2 * sigma ** 2))
+    g3d = g1d[:, None, None] * g1d[None, :, None] * g1d[None, None, :]
+    return g3d.astype(np.float32)
+
+
 def predict_volume(model, volume, patch_size=96, stride=48, device="cpu"):
     x_starts = _start_indices(volume.shape[0], patch_size, stride)
     y_starts = _start_indices(volume.shape[1], patch_size, stride)
@@ -38,6 +47,7 @@ def predict_volume(model, volume, patch_size=96, stride=48, device="cpu"):
 
     accum = np.zeros_like(volume, dtype=np.float32)
     weight = np.zeros_like(volume, dtype=np.float32)
+    gaussian_window = _gaussian_window_3d(patch_size)
 
     with torch.no_grad():
         for x in x_starts:
@@ -48,8 +58,8 @@ def predict_volume(model, volume, patch_size=96, stride=48, device="cpu"):
                     pred_t = model(patch_t)
                     pred = pred_t.squeeze(0).squeeze(0).cpu().numpy()
 
-                    accum[x:x + patch_size, y:y + patch_size, z:z + patch_size] += pred
-                    weight[x:x + patch_size, y:y + patch_size, z:z + patch_size] += 1.0
+                    accum[x:x + patch_size, y:y + patch_size, z:z + patch_size] += pred * gaussian_window
+                    weight[x:x + patch_size, y:y + patch_size, z:z + patch_size] += gaussian_window
 
     return accum / np.maximum(weight, 1e-8)
 
