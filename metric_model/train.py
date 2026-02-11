@@ -174,7 +174,7 @@ def _gaussian_window_3d(patch_size, sigma=None):
     return g3d.astype(np.float32)
 
 @torch.no_grad()
-def predict_volume(model, volume, patch_size=96, stride=48, device="cpu"):
+def predict_volume(stage1, volume, refiner=None, patch_size=96, stride=48, device="cpu"):
     x_starts = _start_indices(volume.shape[0], patch_size, stride)
     y_starts = _start_indices(volume.shape[1], patch_size, stride)
     z_starts = _start_indices(volume.shape[2], patch_size, stride)
@@ -188,7 +188,12 @@ def predict_volume(model, volume, patch_size=96, stride=48, device="cpu"):
             for z in z_starts:
                 patch = volume[x:x + patch_size, y:y + patch_size, z:z + patch_size]
                 patch_t = torch.from_numpy(patch)[None, None, ...].to(device)
-                pred_t = model(patch_t)
+                if refiner is None:
+                    pred_t = stage1(patch_t)
+                else:
+                    y1 = stage1(patch_t)
+                    inp = torch.cat([patch_t, y1], dim=1)
+                    pred_t = y1 + refiner(inp)
                 pred = pred_t.squeeze(0).squeeze(0).cpu().numpy()
 
                 accum[x:x + patch_size, y:y + patch_size, z:z + patch_size] += pred * gaussian_window
@@ -226,6 +231,44 @@ def train_one_epoch(model, loader, optim, device, scaler, ema=None):
 
     return running / max(1, len(loader))
 
+def train_one_epoch_refiner(stage1, ema_stage1, refiner, loader, optim, device, scaler=None, delta_l1_weight=0.01):
+    stage1.eval()
+    refiner.train()
+    running = 0.0
+
+    for lf, hf in loader:
+        lf = lf.to(device, non_blocking=True)
+        hf = hf.to(device, non_blocking=True)
+
+        optim.zero_grad(set_to_none=True)
+
+        with torch.no_grad():
+            ema_backup = None
+            if ema_stage1 is not None:
+                ema_backup = ema_stage1.apply_to(stage1)
+            y1 = stage1(lf)
+            if ema_stage1 is not None:
+                ema_stage1.restore(stage1, ema_backup)
+
+        delta = refiner(torch.cat([lf, y1], dim=1))
+        yhat = y1 + delta
+
+        loss_main = compute_loss(yhat, hf)
+        loss_reg = delta_l1_weight * delta.abs().mean()
+        loss = loss_main + loss_reg
+
+        if scaler is not None and device == "cuda":
+            scaler.scale(loss).backward()
+            scaler.step(optim)
+            scaler.update()
+        else:
+            loss.backward()
+            optim.step()
+
+        running += loss.item()
+
+    return running / max(1, len(loader))
+
 @torch.no_grad()
 def validate(model, loader, device):
     model.eval()
@@ -245,8 +288,10 @@ def validate(model, loader, device):
     return running / max(1, len(loader))
 
 @torch.no_grad()
-def validate_metric(model, pairs, device, patch_size=96, stride=48, max_volumes=None, slice_stride=1):
-    model.eval()
+def validate_metric(stage1, pairs, device, ema=None, refiner=None, patch_size=96, stride=48, max_volumes=None, slice_stride=1):
+    stage1.eval()
+    if refiner is not None:
+        refiner.eval()
     total_ssim = 0.0
     total_psnr = 0.0
     total_slices = 0
@@ -256,7 +301,12 @@ def validate_metric(model, pairs, device, patch_size=96, stride=48, max_volumes=
             break
 
         lf, hf = load_pair_resample_normalize(lf_path, hf_path, interp_order=1)
-        pred = predict_volume(model, lf, patch_size=patch_size, stride=stride, device=device)
+        ema_backup = None
+        if ema is not None:
+            ema_backup = ema.apply_to(stage1)
+        pred = predict_volume(stage1, lf, refiner=refiner, patch_size=patch_size, stride=stride, device=device)
+        if ema is not None:
+            ema.restore(stage1, ema_backup)
         pred = np.clip(pred, 0.0, 1.0)
 
         for z in range(0, hf.shape[2], slice_stride):

@@ -97,3 +97,51 @@ class UNet3D(nn.Module):
         d1 = self.dec1(torch.cat([d1, e1_g], dim=1))
 
         return self.out(d1)
+
+class RefinerUNet3D(nn.Module):
+    """
+    2-level (shallower) UNet refiner.
+    Input:  (B, 2, D, H, W)  -> concat([LF, stage1_pred])
+    Output: (B, 1, D, H, W)  -> residual delta to add to stage1_pred
+    """
+    def __init__(self, in_ch=2, out_ch=1, base=24, dropout_p=0.0):
+        super().__init__()
+        self.enc1 = ResidualBlock(in_ch, base)
+        self.pool1 = nn.MaxPool3d(2)
+
+        self.enc2 = ResidualBlock(base, base * 2)
+        self.pool2 = nn.MaxPool3d(2)
+
+        # Bottleneck for 2-level UNet: 2*base -> 4*base
+        self.bott = ResidualBlock(base * 2, base * 4)
+        self.bott_dropout = nn.Dropout3d(p=dropout_p) if dropout_p > 0 else nn.Identity()
+
+        self.up2 = nn.ConvTranspose3d(base * 4, base * 2, 2, stride=2)
+        self.att2 = AttentionGate3D(base * 2, base * 2, base)
+        self.dec2 = ResidualBlock(base * 4, base * 2)
+
+        self.up1 = nn.ConvTranspose3d(base * 2, base, 2, stride=2)
+        self.att1 = AttentionGate3D(base, base, base // 2)
+        self.dec1 = ResidualBlock(base * 2, base)
+
+        self.out = nn.Conv3d(base, out_ch, 1)
+
+    def forward(self, x):
+        # Encoder
+        e1 = self.enc1(x)              # (B, base, D, H, W)
+        e2 = self.enc2(self.pool1(e1)) # (B, 2*base, D/2, H/2, W/2)
+
+        # Bottleneck
+        b = self.bott(self.pool2(e2))  # (B, 4*base, D/4, H/4, W/4)
+        b = self.bott_dropout(b)
+
+        # Decoder
+        d2 = self.up2(b)               # (B, 2*base, D/2, H/2, W/2)
+        e2_g = self.att2(e2, d2)
+        d2 = self.dec2(torch.cat([d2, e2_g], dim=1))  # (B, 2*base, ...)
+
+        d1 = self.up1(d2)              # (B, base, D, H, W)
+        e1_g = self.att1(e1, d1)
+        d1 = self.dec1(torch.cat([d1, e1_g], dim=1))  # (B, base, ...)
+
+        return self.out(d1)            # (B, out_ch, D, H, W)
