@@ -1,2 +1,5 @@
 mri_resolution/
 .kaggle/
+.ipynb_checkpoints/
+__pycache__/
+*.ipynb
