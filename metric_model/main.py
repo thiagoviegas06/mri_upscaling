@@ -37,7 +37,7 @@ def split_pairs(pairs, val_frac=0.2, seed=42):
 if __name__ == "__main__":
     patch_size = 96
 
-    pairs = make_pairs("mri_resolution/train/low_field", "mri_resolution/train/high_field")
+    pairs = make_pairs("/scratch/tjv235/pytorch-example/mri_upscaling/train/low_field", "/scratch/tjv235/pytorch-example/mri_upscaling/train/high_field")
     train_pairs, val_pairs = split_pairs(pairs, val_frac=0.2, seed=42)
 
     print("Num pairs:", len(pairs))
