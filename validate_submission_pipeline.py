@@ -65,6 +65,35 @@ def build_submission_df(model, pairs, device, patch_size=96, stride=48):
         sample_id = Path(lf_path).name.replace("_lowfield.nii", "")
         hf_img = nib.load(str(hf_path))
         lf_img = nib.load(str(lf_path))
+        lf_resampled = resample_from_to(lf_img, hf_img, order=1)
+        volume = lf_resampled.get_fdata().astype(np.float32)
+        volume = preprocess_volume(volume)
+
+        pred = predict_volume(model, volume, patch_size=patch_size, stride=stride, device=device)
+        pred = np.clip(pred, 0.0, 1.0)
+        rows.extend(volume_to_submission_rows(pred, sample_id))
+    return pd.DataFrame(rows)
+
+
+def build_submission_df_ensemble(models, pairs, device, patch_size=96, stride=48):
+    rows = []
+    for lf_path, hf_path in pairs:
+        sample_id = Path(lf_path).name.replace("_lowfield.nii", "")
+        print(f"  Processing {sample_id}...")
+        hf_img = nib.load(str(hf_path))
+        lf_img = nib.load(str(lf_path))
+        lf_resampled = resample_from_to(lf_img, hf_img, order=1)
+        volume = lf_resampled.get_fdata().astype(np.float32)
+        volume = preprocess_volume(volume)
+
+        pred = ensemble_predict(models, volume, patch_size=patch_size, stride=stride, device=device)
+        pred = np.clip(pred, 0.0, 1.0)
+        rows.extend(volume_to_submission_rows(pred, sample_id))
+    return pd.DataFrame(rows)
+
+
+def main():
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     
     # Set to True to use ensemble, False for single model
     use_ensemble = True
@@ -111,36 +140,7 @@ def build_submission_df(model, pairs, device, patch_size=96, stride=48):
     score = eval_metric.score(solution, submission, "row_id")
     print(f"\nValidation score (submission pipeline): {score:.5f}")
     if use_ensemble:
-        print(f"Ensemble of {len(models)} models
-    for lf_path, hf_path in pairs:
-        sample_id = Path(lf_path).name.replace("_lowfield.nii", "")
-        print(f"  Processing {sample_id}...")
-        hf_img = nib.load(str(hf_path))
-        lf_img = nib.load(str(lf_path))
-        lf_resampled = resample_from_to(lf_img, hf_img, order=1)
-        volume = lf_resampled.get_fdata().astype(np.float32)
-        volume = preprocess_volume(volume)
-
-        pred = ensemble_predict(models, volume, patch_size=patch_size, stride=stride, device=device)
-        pred = np.clip(pred, 0.0, 1.0)
-        rows.extend(volume_to_submission_rows(pred, sample_id))
-    return pd.DataFrame(rows)
-
-
-def main():
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    checkpoint = "checkpoints_metric/best.ckpt"
-
-    pairs = make_pairs("mri_resolution/train/low_field", "mri_resolution/train/high_field")
-    if not pairs:
-        raise RuntimeError("No LF/HF pairs found for validation.")
-
-    model = load_model(checkpoint, device=device, base=56)
-    solution = build_solution_df(pairs)
-    submission = build_submission_df(model, pairs, device=device, patch_size=96, stride=96 // 3)
-
-    score = eval_metric.score(solution, submission, "row_id")
-    print(f"Validation score (submission pipeline): {score:.5f}")
+        print(f"Ensemble of {len(models)} models")
 
 
 if __name__ == "__main__":
