@@ -193,7 +193,12 @@ def predict_volume(stage1, volume, refiner=None, patch_size=96, stride=48, devic
                 else:
                     y1 = stage1(patch_t)
                     inp = torch.cat([patch_t, y1], dim=1)
-                    pred_t = y1 + refiner(inp)
+                    delta = refiner(inp)
+
+                    limit = 0.2  # keep same as training; also try 0.1
+                    delta = limit * torch.tanh(delta / limit)
+
+                    pred_t = y1 + delta
                 pred = pred_t.squeeze(0).squeeze(0).cpu().numpy()
 
                 accum[x:x + patch_size, y:y + patch_size, z:z + patch_size] += pred * gaussian_window
@@ -251,6 +256,10 @@ def train_one_epoch_refiner(stage1, ema_stage1, refiner, loader, optim, device, 
                 ema_stage1.restore(stage1, ema_backup)
 
         delta = refiner(torch.cat([lf, y1], dim=1))
+
+        limit = 0.2  # try 0.2 first; also test 0.1
+        delta = limit * torch.tanh(delta / limit)
+
         yhat = y1 + delta
 
         loss_main = compute_loss(yhat, hf)

@@ -63,7 +63,7 @@ if __name__ == "__main__":
     refiner = RefinerUNet3D(in_ch=2, out_ch=1, base=24, dropout_p=0.0).to(device)
 
     optim1 = torch.optim.AdamW(stage1.parameters(), lr=2e-4, weight_decay=1e-4)
-    optim2 = torch.optim.AdamW(refiner.parameters(), lr=1e-4, weight_decay=1e-4)
+    optim2 = torch.optim.AdamW(refiner.parameters(), lr=5e-5, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optim1,
         mode="max",
@@ -173,7 +173,7 @@ if __name__ == "__main__":
             optim2,
             device,
             scaler=scaler,
-            delta_l1_weight=0.01,
+            delta_l1_weight=0.05,
         )
         val_score, val_ssim, val_psnr, val_slices = validate_metric(
             stage1,
