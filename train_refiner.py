@@ -67,7 +67,7 @@ class SliceRefinementDataset(Dataset):
 def train_refiner_one_epoch(model, loader, optim, scaler, device):
     model.train()
     running_loss = 0.0
-    criterion = nn.L1Loss()
+    criterion = nn.MSELoss()
     
     for pred_slice, hf_slice in loader:
         pred_slice = pred_slice.to(device, non_blocking=True)
@@ -116,11 +116,21 @@ def main():
 
     # 4. Setup Refiner
     refiner = RRDBNet(in_nc=1, out_nc=1, nf=64, nb=4).to(DEVICE)
-    optim = torch.optim.AdamW(refiner.parameters(), lr=1e-4)
+    optim = torch.optim.AdamW(refiner.parameters(), lr=5e-4, weight_decay=1e-4)
+    
+    # 2. Add a Scheduler (same as in your original train.py)
+    # This protects you: if 5e-4 is too high and loss jumps, it will drop the LR.
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optim,
+        mode="max",      # We want to maximize 'val_score'
+        factor=0.5,      # Cut LR in half if stuck
+        patience=3,      # Wait 3 epochs before cutting
+        min_lr=1e-6
+    )
     scaler = GradScaler()
     
     # Optional: EMA for Refiner
-    ema = EMA(refiner, decay=0.999)
+    # ema = EMA(refiner, decay=0.999)
 
     # 5. Cascaded Model for Validation
     # This wraps (UNet + Refiner) to look like a single 3D model to the validator
@@ -132,11 +142,11 @@ def main():
     for epoch in range(1, NUM_EPOCHS + 1):
         # -- Train Step (2D) --
         train_loss = train_refiner_one_epoch(refiner, train_loader, optim, scaler, DEVICE)
-        ema.update(refiner)
+        # ema.update(refiner)
         
         # -- Validation Step (3D) --
         # We use the EMA weights for validation
-        ema_backup = ema.apply_to(refiner)
+        # ema_backup = ema.apply_to(refiner)
         
         # A. Calculate Val L1 Loss (and 3D SSIM loss component) using `validate` from train.py
         val_loss = validate(cascaded_model, val_loader, DEVICE)
@@ -151,7 +161,8 @@ def main():
             stride=PATCH_SIZE // 2
         )
         
-        ema.restore(refiner, ema_backup)
+        scheduler.step(val_score)
+        # ema.restore(refiner, ema_backup)
 
         # -- Logging --
         print(
@@ -165,7 +176,7 @@ def main():
             torch.save({
                 "epoch": epoch,
                 "model": refiner.state_dict(),
-                "ema": ema.state_dict(),
+                # "ema": ema.state_dict(),
                 "val_score": val_score
             }, REFINER_CHECKPOINT)
             print(f"Saved Refiner Best: {REFINER_CHECKPOINT}")
