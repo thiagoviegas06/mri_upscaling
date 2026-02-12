@@ -5,29 +5,36 @@ import torch
 from nibabel.processing import resample_from_to
 from tqdm import tqdm
 
+# Import the wrapper that combines UNet + Refiner
+from refiner_model import RRDBNet, CascadedModel
 from model import UNet3D
-from refiner_model import RRDBNet
 from preprocessing import preprocess_volume
 from mri_resolution.extract_slices import create_submission_df
 
-def load_models(unet_path="checkpoints/best.ckpt", refiner_path="checkpoints/refiner_best.ckpt", device="cpu"):
-    # Load UNet
+def load_cascaded_model(unet_path="checkpoints/best.ckpt", refiner_path="checkpoints/refiner_best.ckpt", device="cpu"):
+    """
+    Loads both models and wraps them into a single CascadedModel
+    that behaves like a standard 3D model (Input: 3D Patch -> Output: 3D Patch).
+    """
+    # 1. Load UNet
     unet = UNet3D(base=56).to(device)
     unet_ckpt = torch.load(unet_path, map_location=device)
+    # Handle potentially different checkpoint structures
     unet_state = unet_ckpt["ema"] if "ema" in unet_ckpt else unet_ckpt["model"]
     unet.load_state_dict(unet_state)
-    unet.eval()
     
-    # Load Refiner
-    refiner = RRDBNet(in_nc=1, out_nc=1, nf=64, nb=4).to(device) # Ensure nb matches training
-    if Path(refiner_path).exists():
-        refiner_ckpt = torch.load(refiner_path, map_location=device)
-        refiner.load_state_dict(refiner_ckpt["model"])
-    else:
-        print("Warning: Refiner checkpoint not found, skipping refinement weights.")
-    refiner.eval()
+    # 2. Load Refiner
+    refiner = RRDBNet(in_nc=1, out_nc=1, nf=64, nb=4).to(device)
+    refiner_ckpt = torch.load(refiner_path, map_location=device)
+    refiner_state = refiner_ckpt["ema"] if "ema" in refiner_ckpt else (refiner_ckpt["model"] if "model" in refiner_ckpt else refiner_ckpt)
+    refiner.load_state_dict(refiner_state)
     
-    return unet, refiner
+    # 3. Wrap
+    model = CascadedModel(unet, refiner, device=device)
+    model.eval()
+    return model
+
+# --- Sliding Window Helpers (Restored) ---
 
 def _start_indices(dim, patch_size, stride):
     if dim <= patch_size:
@@ -45,8 +52,12 @@ def _gaussian_window_3d(patch_size, sigma=None):
     g3d = g1d[:, None, None] * g1d[None, :, None] * g1d[None, None, :]
     return g3d.astype(np.float32)
 
-def predict_volume_unet(model, volume, patch_size=96, stride=48, device="cpu"):
-    """Stage 1: 3D UNet Prediction"""
+def predict_volume(model, volume, patch_size=96, stride=48, device="cpu"):
+    """
+    Standard sliding window inference. 
+    Because 'model' is now the CascadedModel, passing a 3D patch here 
+    will automatically trigger: 3D UNet -> Slice Split -> 2D Refiner -> 3D Merge.
+    """
     x_starts = _start_indices(volume.shape[0], patch_size, stride)
     y_starts = _start_indices(volume.shape[1], patch_size, stride)
     z_starts = _start_indices(volume.shape[2], patch_size, stride)
@@ -59,37 +70,23 @@ def predict_volume_unet(model, volume, patch_size=96, stride=48, device="cpu"):
         for x in x_starts:
             for y in y_starts:
                 for z in z_starts:
+                    # Extract 3D Patch
                     patch = volume[x:x + patch_size, y:y + patch_size, z:z + patch_size]
+                    
+                    # Convert to tensor (B, C, D, H, W)
                     patch_t = torch.from_numpy(patch)[None, None, ...].to(device)
+                    
+                    # Run Cascade (UNet + Refiner)
                     pred_t = model(patch_t)
+                    
+                    # Back to numpy
                     pred = pred_t.squeeze(0).squeeze(0).cpu().numpy()
 
+                    # Accumulate
                     accum[x:x + patch_size, y:y + patch_size, z:z + patch_size] += pred * gaussian_window
                     weight[x:x + patch_size, y:y + patch_size, z:z + patch_size] += gaussian_window
 
     return accum / np.maximum(weight, 1e-8)
-
-def refine_volume_slices(refiner, volume, batch_size=16, device="cpu"):
-    """Stage 2: 2D Slice Refinement (Axial/Z-axis)"""
-    D, H, W = volume.shape
-    refined_volume = np.zeros_like(volume)
-    
-    with torch.no_grad():
-        # Process in batches of slices
-        for i in range(0, D, batch_size):
-            end = min(i + batch_size, D)
-            slices = volume[i:end, :, :] # (B, H, W)
-            
-            # Prepare tensor: (B, 1, H, W)
-            slices_t = torch.from_numpy(slices).unsqueeze(1).to(device)
-            
-            # Refine
-            refined_t = refiner(slices_t)
-            refined_batch = refined_t.squeeze(1).cpu().numpy()
-            
-            refined_volume[i:end, :, :] = refined_batch
-            
-    return refined_volume
 
 def get_hf_template(hf_dir="mri_resolution/train/high_field"):
     hf_dir = Path(hf_dir)
@@ -100,30 +97,33 @@ def get_hf_template(hf_dir="mri_resolution/train/high_field"):
 
 def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    unet, refiner = load_models(device=device)
+    
+    # Load the combined pipeline
+    # Ensure paths match where your train_refiner.py saved them
+    model = load_cascaded_model(
+        unet_path="checkpoints/best.ckpt", 
+        refiner_path="checkpoints/refiner_best.ckpt", 
+        device=device
+    )
 
     hf_template = get_hf_template()
-
     test_dir = Path("mri_resolution/test/low_field")
     predictions = {}
 
-    print("Starting Inference Pipeline: UNet3D -> RRDBRefiner...")
+    print("Running Inference with Cascaded Model...")
     for low_path in tqdm(sorted(test_dir.glob("*.nii"))):
         sample_id = low_path.name.replace("_lowfield.nii", "")
         lf_img = nib.load(str(low_path))
+        
+        # Resample to match High Field resolution
         lf_resampled = resample_from_to(lf_img, hf_template, order=1)
         volume = lf_resampled.get_fdata().astype(np.float32)
         volume = preprocess_volume(volume)
 
-        # Stage 1: UNet
-        unet_pred = predict_volume_unet(unet, volume, patch_size=96, stride=32, device=device)
-        
-        # Stage 2: Refiner
-        # We iterate over the Depth (Z) axis. If you want X or Y, change indexing.
-        refined_pred = refine_volume_slices(refiner, unet_pred, device=device)
-
-        final_pred = np.clip(refined_pred, 0.0, 1.0)
-        predictions[sample_id] = final_pred
+        # Predict using sliding window on the CascadedModel
+        pred = predict_volume(model, volume, patch_size=96, stride=48, device=device)
+        pred = np.clip(pred, 0.0, 1.0)
+        predictions[sample_id] = pred
 
     df = create_submission_df(predictions)
     df.to_csv("submission.csv", index=False)

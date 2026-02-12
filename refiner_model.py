@@ -56,3 +56,35 @@ class RRDBNet(nn.Module):
         out = self.conv_last(feat)
         # Global Residual Learning: Add input to output (restoration mode)
         return x + out
+    
+
+class CascadedModel(nn.Module):
+    """
+    Wraps the UNet and Refiner into a single model for 3D validation.
+    Input: (B, 1, D, H, W) -> UNet -> (B, 1, D, H, W) -> Slicing -> Refiner -> (B, 1, D, H, W)
+    """
+    def __init__(self, unet, refiner, device="cuda"):
+        super().__init__()
+        self.unet = unet
+        self.refiner = refiner
+        self.device = device
+
+    def forward(self, x):
+        # 1. UNet Prediction (3D)
+        # x is (B, 1, D, H, W)
+        feat = self.unet(x) 
+        
+        # 2. Reshape for Refiner (2D)
+        # We treat the Depth (D) dimension as the batch for the 2D refiner
+        B, C, D, H, W = feat.shape
+        # Permute to (B, D, C, H, W) then reshape to (B*D, C, H, W)
+        feat_2d = feat.permute(0, 2, 1, 3, 4).reshape(-1, C, H, W)
+        
+        # 3. Refine Slices
+        refined_2d = self.refiner(feat_2d)
+        
+        # 4. Reshape back to 3D
+        # (B*D, C, H, W) -> (B, D, C, H, W) -> (B, C, D, H, W)
+        out = refined_2d.reshape(B, D, C, H, W).permute(0, 2, 1, 3, 4)
+        
+        return out
