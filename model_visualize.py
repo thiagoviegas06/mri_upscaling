@@ -10,7 +10,7 @@ from nibabel.processing import resample_from_to
 # Import from your existing modules
 from model import UNet3D
 from preprocessing import load_pair_resample_normalize
-from test import predict_volume
+from test import predict_volume_unet
 
 def load_model(checkpoint_path, device="cpu", base=56):
     """Loads the UNet3D model from the specified checkpoint."""
@@ -104,7 +104,7 @@ def main():
 
         # Predict
         # Using predict_volume from test.py/train.py logic
-        pred = predict_volume(model, lf, patch_size=96, stride=32, device=args.device)
+        pred = predict_volume_unet(model, lf, patch_size=96, stride=32, device=args.device)
         pred = np.clip(pred, 0.0, 1.0)
 
         # Visualize
