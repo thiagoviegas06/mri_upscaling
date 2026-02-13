@@ -236,7 +236,7 @@ def train_one_epoch(model, loader, optim, device, scaler, ema=None):
 
     return running / max(1, len(loader))
 
-def train_one_epoch_refiner(stage1, ema_stage1, refiner, loader, optim, device, scaler=None, delta_l1_weight=0.01):
+def train_one_epoch_refiner(stage1, ema_stage1, refiner, loader, optim, device, scaler=None, delta_l1_weight=0.01, l2_weight=0.0):
     stage1.eval()
     refiner.train()
     running = 0.0
@@ -264,7 +264,8 @@ def train_one_epoch_refiner(stage1, ema_stage1, refiner, loader, optim, device, 
 
         loss_main = compute_loss(yhat, hf)
         loss_reg = delta_l1_weight * delta.abs().mean()
-        loss = loss_main + loss_reg
+        loss_l2 = l2_weight * F.mse_loss(yhat, hf) if l2_weight > 0 else 0.0
+        loss = loss_main + loss_reg + loss_l2
 
         if scaler is not None and device == "cuda":
             scaler.scale(loss).backward()

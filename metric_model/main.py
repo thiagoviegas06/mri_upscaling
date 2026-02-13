@@ -34,18 +34,41 @@ def split_pairs(pairs, val_frac=0.2, seed=42):
     n_val = max(1, int(len(pairs) * val_frac))
     return pairs[n_val:], pairs[:n_val]
 
-if __name__ == "__main__":
-    patch_size = 96
+def make_kfold_splits(pairs, k=5, seed=42):
+    pairs = list(pairs)
+    rng = random.Random(seed)
+    rng.shuffle(pairs)
+    k = max(2, int(k))
 
-    pairs = make_pairs("/scratch/tjv235/pytorch-example/mri_upscaling/mri_resolution/train/low_field", "/scratch/tjv235/pytorch-example/mri_upscaling/mri_resolution/train/high_field")
-    train_pairs, val_pairs = split_pairs(pairs, val_frac=0.2, seed=42)
+    folds = []
+    n = len(pairs)
+    base = n // k
+    rem = n % k
+    start = 0
+    for i in range(k):
+        size = base + (1 if i < rem else 0)
+        end = start + size
+        folds.append(pairs[start:end])
+        start = end
 
-    print("Num pairs:", len(pairs))
-    print("Train pairs:", len(train_pairs), "Val pairs:", len(val_pairs))
-    print("CUDA available:", torch.cuda.is_available())
-    if torch.cuda.is_available():
-        print("GPU:", torch.cuda.get_device_name(0))
+    splits = []
+    for i in range(k):
+        val_pairs = folds[i]
+        train_pairs = []
+        for j in range(k):
+            if j != i:
+                train_pairs.extend(folds[j])
+        splits.append((train_pairs, val_pairs))
+    return splits
 
+def run_fold(
+    fold_idx,
+    train_pairs,
+    val_pairs,
+    patch_size,
+    device,
+    save_dir_base,
+):
     train_ds = MRIPatchDataset(
         train_pairs,
         patch_size=patch_size,
@@ -53,12 +76,16 @@ if __name__ == "__main__":
         cache_volumes=True,
         augment=True,
     )
-    val_ds   = MRIPatchDataset(val_pairs,   patch_size=patch_size, patches_per_volume=16, cache_volumes=True)
+    val_ds = MRIPatchDataset(
+        val_pairs,
+        patch_size=patch_size,
+        patches_per_volume=16,
+        cache_volumes=True,
+    )
 
-    train_loader = DataLoader(train_ds, batch_size=2, shuffle=True,  num_workers=4, pin_memory=True)
-    val_loader   = DataLoader(val_ds,   batch_size=2, shuffle=False, num_workers=2, pin_memory=True)
+    train_loader = DataLoader(train_ds, batch_size=2, shuffle=True, num_workers=4, pin_memory=True)
+    val_loader = DataLoader(val_ds, batch_size=2, shuffle=False, num_workers=2, pin_memory=True)
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
     stage1 = UNet3D(base=56).to(device)
     refiner = RefinerUNet3D(in_ch=2, out_ch=1, base=24, dropout_p=0.0).to(device)
 
@@ -78,7 +105,7 @@ if __name__ == "__main__":
     best_epoch = 0
     patience = 12
     epochs_no_improve = 0
-    save_dir = os.environ.get("MODEL_DESTINATION_METRIC", "checkpoints_metric")
+    save_dir = os.path.join(save_dir_base, f"fold_{fold_idx + 1:02d}")
     os.makedirs(save_dir, exist_ok=True)
     best_path = os.path.join(save_dir, "best.ckpt")
 
@@ -110,13 +137,14 @@ if __name__ == "__main__":
                     "val_ssim": val_ssim,
                     "val_psnr": val_psnr,
                 },
-                epoch_path
+                epoch_path,
             )
             print("Saved epoch checkpoint to:", epoch_path)
 
         print(
-            f"epoch {epoch:02d} | train loss: {train_loss:.5f} | val loss: {val_loss:.5f} "
-            f"| val score: {val_score:.5f} (ssim {val_ssim:.5f}, psnr {val_psnr:.2f}, n={val_slices})"
+            f"fold {fold_idx + 1:02d} epoch {epoch:02d} | train loss: {train_loss:.5f} | "
+            f"val loss: {val_loss:.5f} | val score: {val_score:.5f} "
+            f"(ssim {val_ssim:.5f}, psnr {val_psnr:.2f}, n={val_slices})"
         )
 
         scheduler.step(val_score)
@@ -136,14 +164,15 @@ if __name__ == "__main__":
                     "val_ssim": val_ssim,
                     "val_psnr": val_psnr,
                 },
-                best_path
+                best_path,
             )
             print("Saved best to:", best_path)
         else:
             epochs_no_improve += 1
             if epochs_no_improve >= patience:
                 print(
-                    f"Early stopping at epoch {epoch:02d} (best epoch {best_epoch:02d}, score {best_val:.5f})"
+                    f"Early stopping at epoch {epoch:02d} (best epoch {best_epoch:02d}, "
+                    f"score {best_val:.5f})"
                 )
                 break
 
@@ -174,6 +203,7 @@ if __name__ == "__main__":
             device,
             scaler=scaler,
             delta_l1_weight=0.05,
+            l2_weight=0.1,
         )
         val_score, val_ssim, val_psnr, val_slices = validate_metric(
             stage1,
@@ -203,8 +233,9 @@ if __name__ == "__main__":
             print("Saved refiner checkpoint to:", epoch_path)
 
         print(
-            f"stage2 epoch {epoch:02d} | train loss: {train_loss:.5f} | val score: {val_score:.5f} "
-            f"(ssim {val_ssim:.5f}, psnr {val_psnr:.2f}, n={val_slices})"
+            f"fold {fold_idx + 1:02d} stage2 epoch {epoch:02d} | train loss: {train_loss:.5f} | "
+            f"val score: {val_score:.5f} (ssim {val_ssim:.5f}, psnr {val_psnr:.2f}, "
+            f"n={val_slices})"
         )
 
         if val_score > best_val2:
@@ -258,3 +289,56 @@ if __name__ == "__main__":
             best_overall_path,
         )
         print("Saved overall best from stage1 to:", best_overall_path)
+
+    return {
+        "best_stage1": best_val,
+        "best_stage2": best_val2,
+        "save_dir": save_dir,
+    }
+
+if __name__ == "__main__":
+    patch_size = 96
+
+    pairs = make_pairs("/scratch/tjv235/pytorch-example/mri_upscaling/mri_resolution/train/low_field", "/scratch/tjv235/pytorch-example/mri_upscaling/mri_resolution/train/high_field")
+    k_folds = int(os.environ.get("K_FOLDS", "5"))
+    kfold_splits = make_kfold_splits(pairs, k=k_folds, seed=42)
+
+    print("Num pairs:", len(pairs))
+    print("K folds:", k_folds)
+    print("CUDA available:", torch.cuda.is_available())
+    if torch.cuda.is_available():
+        print("GPU:", torch.cuda.get_device_name(0))
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    save_dir_base = os.environ.get("MODEL_DESTINATION_METRIC", "checkpoints_metric")
+    os.makedirs(save_dir_base, exist_ok=True)
+
+    fold_results = []
+    for fold_idx, (train_pairs, val_pairs) in enumerate(kfold_splits):
+        print("-" * 80)
+        print(
+            f"Fold {fold_idx + 1:02d}/{k_folds}: train pairs {len(train_pairs)}, "
+            f"val pairs {len(val_pairs)}"
+        )
+        fold_result = run_fold(
+            fold_idx,
+            train_pairs,
+            val_pairs,
+            patch_size,
+            device,
+            save_dir_base,
+        )
+        fold_results.append(fold_result)
+
+    best_stage1_scores = [r["best_stage1"] for r in fold_results]
+    best_stage2_scores = [r["best_stage2"] for r in fold_results]
+    print("=" * 80)
+    print("K-fold summary")
+    print("Stage1 best scores:", best_stage1_scores)
+    print("Stage2 best scores:", best_stage2_scores)
+    print(
+        f"Stage1 mean: {sum(best_stage1_scores) / len(best_stage1_scores):.5f}"
+    )
+    print(
+        f"Stage2 mean: {sum(best_stage2_scores) / len(best_stage2_scores):.5f}"
+    )
