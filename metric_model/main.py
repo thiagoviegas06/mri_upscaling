@@ -39,8 +39,10 @@ if __name__ == "__main__":
     stack_size = 7
     train_refiner = False
     warmup_epochs = 12
-    ms_weight_start = 0.1
-    ms_weight_final = 0.5
+    ms_ssim_weight_start = 1.0  # weight for (1 - MS-SSIM) in loss
+    l1_weight_start = 1.0       # weight for L1 in loss
+    ms_ssim_weight_final = 1.0
+    l1_weight_final = 1.0
 
     pairs = make_pairs("/scratch/tjv235/pytorch-example/mri_upscaling/mri_resolution/train/low_field", "/scratch/tjv235/pytorch-example/mri_upscaling/mri_resolution/train/high_field")
     train_pairs, val_pairs = split_pairs(pairs, val_frac=0.2, seed=42)
@@ -97,21 +99,27 @@ if __name__ == "__main__":
     num_epochs = 40
     for epoch in range(1, num_epochs + 1):
         if epoch <= warmup_epochs:
-            ms_weight = ms_weight_start + (ms_weight_final - ms_weight_start) * (epoch / warmup_epochs)
+            ms_ssim_weight = ms_ssim_weight_start + (ms_ssim_weight_final - ms_ssim_weight_start) * (epoch / warmup_epochs)
+            l1_weight = l1_weight_start + (l1_weight_final - l1_weight_start) * (epoch / warmup_epochs)
         else:
-            ms_weight = ms_weight_final
+            ms_ssim_weight = ms_ssim_weight_final
+            l1_weight = l1_weight_final
 
-        train_loss = train_one_epoch(stage1, train_loader, optim1, device, scaler, ema=ema, ms_weight=ms_weight)
+        train_loss = train_one_epoch(stage1, train_loader, optim1, device, scaler, ema=ema, ms_ssim_weight=ms_ssim_weight, l1_weight=l1_weight)
 
         ema_backup = ema.apply_to(stage1)
-        val_loss = validate(stage1, val_loader, device, ms_weight=ms_weight)
-        val_score, val_ssim, val_ms_ssim, val_psnr, val_slices = validate_metric(
+        val_loss = validate(stage1, val_loader, device)  # Optionally update to use ms_ssim_weight if needed
+        val_score, val_ms_ssim, val_ssim, val_psnr, val_slices = validate_metric(
             stage1,
             val_pairs,
             device,
             patch_size=patch_size,
             stride=patch_size // 2,
-            stack_size=stack_size,
+            n_slices=10,  # or make configurable
+            epoch=epoch,
+            group_size=5,  # or make configurable
+            use_ms_ssim=True,
+            # stack_size=stack_size,  # if your validate_metric supports it
         )
         ema.restore(stage1, ema_backup)
 
@@ -135,8 +143,8 @@ if __name__ == "__main__":
 
         print(
             f"epoch {epoch:02d} | train loss: {train_loss:.5f} | val loss: {val_loss:.5f} "
-            f"| val score: {val_score:.5f} (ssim {val_ssim:.5f}, ms_ssim {val_ms_ssim:.5f}, "
-            f"psnr {val_psnr:.2f}, n={val_slices}) | ms_w {ms_weight:.2f}"
+            f"| val score: {val_score:.5f} (ms-ssim {val_ms_ssim:.5f}, ssim {val_ssim:.5f}, psnr {val_psnr:.2f}, n={val_slices}) "
+            f"| ms_ssim_w {ms_ssim_weight:.2f} l1_w {l1_weight:.2f}"
         )
 
         scheduler.step(val_score)

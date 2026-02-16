@@ -395,5 +395,5 @@ def validate_metric(stage1, pairs, device, ema=None, refiner=None, patch_size=96
     mean_ssim = total_ssim / total_slices
     mean_ms_ssim = total_ms_ssim / total_slices
     mean_psnr = total_psnr / total_slices
-    score = 0.5 * mean_ssim + 0.5 * (mean_psnr / 50.0)
+    score = mean_ms_ssim  # Competition metric: MS-SSIM only
     return score, mean_ssim, mean_ms_ssim, mean_psnr, total_slices
