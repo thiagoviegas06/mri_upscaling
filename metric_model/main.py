@@ -38,9 +38,9 @@ if __name__ == "__main__":
     patch_size = 96
     stack_size = 5
     train_refiner = False
-    warmup_epochs = 5
-    ms_weight_start = 0.2
-    ms_weight_final = 0.6
+    warmup_epochs = 12
+    ms_weight_start = 0.1
+    ms_weight_final = 0.5
 
     pairs = make_pairs("/scratch/tjv235/pytorch-example/mri_upscaling/mri_resolution/train/low_field", "/scratch/tjv235/pytorch-example/mri_upscaling/mri_resolution/train/high_field")
     train_pairs, val_pairs = split_pairs(pairs, val_frac=0.2, seed=42)
@@ -74,8 +74,8 @@ if __name__ == "__main__":
     stage1 = UNet2D(in_ch=stack_size, base=56).to(device)
     refiner = RefinerUNet2D(in_ch=stack_size + 1, out_ch=1, base=24, dropout_p=0.0).to(device)
 
-    optim1 = torch.optim.AdamW(stage1.parameters(), lr=2e-4, weight_decay=1e-4)
-    optim2 = torch.optim.AdamW(refiner.parameters(), lr=5e-5, weight_decay=1e-4)
+    optim1 = torch.optim.AdamW(stage1.parameters(), lr=1e-4, weight_decay=1e-4)
+    optim2 = torch.optim.AdamW(refiner.parameters(), lr=3e-5, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optim1,
         mode="max",
