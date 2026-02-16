@@ -1,8 +1,7 @@
-import os
 import random
 import numpy as np
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset
 import nibabel as nib
 from nibabel.processing import resample_from_to
 
@@ -26,97 +25,73 @@ def load_pair_resample_normalize(lf_path, hf_path, interp_order=1):
 
     return lf, hf  # numpy arrays, same shape (179,221,200)
 
-def random_patch_coords(vol_shape, patch_size, mask=None, min_foreground_ratio=0.05, max_tries=20):
-    # vol_shape: (X,Y,Z)
+def random_xy_coords(vol_shape, patch_size):
+    # vol_shape: (X, Y, Z)
     x_max = vol_shape[0] - patch_size
     y_max = vol_shape[1] - patch_size
-    z_max = vol_shape[2] - patch_size
-    if min(x_max, y_max, z_max) < 0:
+    if min(x_max, y_max) < 0:
         raise ValueError(f"Patch size {patch_size} too large for volume shape {vol_shape}")
-    x = y = z = 0
-    for _ in range(max_tries):
-        x = random.randint(0, x_max)
-        y = random.randint(0, y_max)
-        z = random.randint(0, z_max)
-        if mask is None:
-            return x, y, z
-        patch_mask = mask[x:x+patch_size, y:y+patch_size, z:z+patch_size]
-        if patch_mask.mean() >= min_foreground_ratio:
-            return x, y, z
-    return x, y, z
+    x = random.randint(0, x_max)
+    y = random.randint(0, y_max)
+    return x, y
+
+def random_z_index(vol_shape, stack_size):
+    z_dim = vol_shape[2]
+    half = stack_size // 2
+    if z_dim < stack_size:
+        raise ValueError(f"Stack size {stack_size} too large for depth {z_dim}")
+    z_min = half
+    z_max = z_dim - half - 1
+    return random.randint(z_min, z_max)
 
 def compute_foreground_mask(volume, percentile=20):
     thresh = np.percentile(volume, percentile)
     return volume > thresh
 
-def extract_patch(vol, x, y, z, patch_size):
-    return vol[x:x+patch_size, y:y+patch_size, z:z+patch_size]
+def extract_xy_patch(vol, x, y, z, patch_size):
+    return vol[x:x+patch_size, y:y+patch_size, z]
 
-def _augment_pair(lf_p, hf_p):
-    # Apply identical random flips and in-plane rotations to LF/HF patches.
+def extract_slice_stack(vol, x, y, z_center, patch_size, stack_size):
+    half = stack_size // 2
+    slices = []
+    for z in range(z_center - half, z_center + half + 1):
+        slices.append(extract_xy_patch(vol, x, y, z, patch_size))
+    return np.stack(slices, axis=0)
+
+def _augment_pair_2d(lf_stack, hf_slice):
+    # Apply identical random flips and rotations to LF stack and HF slice.
     if random.random() < 0.5:
-        lf_p = lf_p[::-1, :, :]
-        hf_p = hf_p[::-1, :, :]
+        lf_stack = lf_stack[:, ::-1, :]
+        hf_slice = hf_slice[::-1, :]
     if random.random() < 0.5:
-        lf_p = lf_p[:, ::-1, :]
-        hf_p = hf_p[:, ::-1, :]
-    if random.random() < 0.5:
-        lf_p = lf_p[:, :, ::-1]
-        hf_p = hf_p[:, :, ::-1]
+        lf_stack = lf_stack[:, :, ::-1]
+        hf_slice = hf_slice[:, ::-1]
 
     k = random.randint(0, 3)
     if k:
-        lf_p = np.rot90(lf_p, k, axes=(0, 1))
-        hf_p = np.rot90(hf_p, k, axes=(0, 1))
+        lf_stack = np.rot90(lf_stack, k, axes=(1, 2))
+        hf_slice = np.rot90(hf_slice, k, axes=(0, 1))
 
-    return lf_p, hf_p
-
-def _augment_volume_pair(lf_v, hf_v, mask=None):
-    # Apply identical random flips and in-plane rotations to full volumes.
-    if random.random() < 0.5:
-        lf_v = lf_v[::-1, :, :]
-        hf_v = hf_v[::-1, :, :]
-        if mask is not None:
-            mask = mask[::-1, :, :]
-    if random.random() < 0.5:
-        lf_v = lf_v[:, ::-1, :]
-        hf_v = hf_v[:, ::-1, :]
-        if mask is not None:
-            mask = mask[:, ::-1, :]
-    if random.random() < 0.5:
-        lf_v = lf_v[:, :, ::-1]
-        hf_v = hf_v[:, :, ::-1]
-        if mask is not None:
-            mask = mask[:, :, ::-1]
-
-    k = random.randint(0, 3)
-    if k:
-        lf_v = np.rot90(lf_v, k, axes=(0, 1))
-        hf_v = np.rot90(hf_v, k, axes=(0, 1))
-        if mask is not None:
-            mask = np.rot90(mask, k, axes=(0, 1))
-
-    lf_v = lf_v.copy()
-    hf_v = hf_v.copy()
-    if mask is not None:
-        mask = mask.copy()
-
-    return lf_v, hf_v, mask
+    return lf_stack, hf_slice
 
 # ---------- dataset ----------
 class MRIPatchDataset(Dataset):
     """
-    Returns random LF/HF patch pairs.
-    Each __getitem__ picks a random patch from one subject volume.
+    Returns 2.5D LF/HF patch pairs.
+    Each __getitem__ picks an XY patch and a Z-center slice, then stacks k
+    adjacent LF slices (channels) and predicts the center HF slice.
     """
     def __init__(self, pairs, patch_size=96, patches_per_volume=64, cache_volumes=True,
                  tissue_sampling=True, foreground_percentile=20, min_foreground_ratio=0.05, max_tries=20,
-                 augment=False, volume_augment=False):
+                 augment=False, stack_size=5):
         """
         pairs: list of (lf_path, hf_path)
         patches_per_volume: how many patches to draw per volume per epoch
         cache_volumes: cache preprocessed volumes in RAM to speed up epochs
+        stack_size: number of adjacent slices for 2.5D input (must be odd)
         """
+        if stack_size % 2 == 0:
+            raise ValueError("stack_size must be odd")
         self.pairs = pairs
         self.patch_size = patch_size
         self.patches_per_volume = patches_per_volume
@@ -126,8 +101,8 @@ class MRIPatchDataset(Dataset):
         self.min_foreground_ratio = min_foreground_ratio
         self.max_tries = max_tries
         self.augment = augment
-        self.volume_augment = volume_augment
-        self._cache = {}  # idx -> (lf_np, hf_np)
+        self.stack_size = stack_size
+        self._cache = {}  # idx -> (lf_np, hf_np, mask)
 
         # Make dataset length = number of "patch samples" per epoch
         self._length = len(pairs) * patches_per_volume
@@ -153,25 +128,26 @@ class MRIPatchDataset(Dataset):
         vol_idx = idx // self.patches_per_volume
         lf, hf, mask = self._get_volume_pair(vol_idx)
 
-        if self.volume_augment:
-            lf, hf, mask = _augment_volume_pair(lf, hf, mask)
+        z = random_z_index(lf.shape, self.stack_size)
 
-        x, y, z = random_patch_coords(
-            lf.shape,
-            self.patch_size,
-            mask=mask,
-            min_foreground_ratio=self.min_foreground_ratio,
-            max_tries=self.max_tries,
-        )
-        lf_p = extract_patch(lf, x, y, z, self.patch_size)
-        hf_p = extract_patch(hf, x, y, z, self.patch_size)
+        x = y = 0
+        for _ in range(self.max_tries):
+            x, y = random_xy_coords(lf.shape, self.patch_size)
+            if mask is None:
+                break
+            patch_mask = mask[x:x + self.patch_size, y:y + self.patch_size, z]
+            if patch_mask.mean() >= self.min_foreground_ratio:
+                break
+
+        lf_stack = extract_slice_stack(lf, x, y, z, self.patch_size, self.stack_size)
+        hf_slice = extract_xy_patch(hf, x, y, z, self.patch_size)
 
         if self.augment:
-            lf_p, hf_p = _augment_pair(lf_p, hf_p)
-            lf_p = lf_p.copy()
-            hf_p = hf_p.copy()
+            lf_stack, hf_slice = _augment_pair_2d(lf_stack, hf_slice)
+            lf_stack = lf_stack.copy()
+            hf_slice = hf_slice.copy()
 
-        # to torch: (C, X, Y, Z)
-        lf_t = torch.from_numpy(lf_p)[None, ...]
-        hf_t = torch.from_numpy(hf_p)[None, ...]
+        # to torch: LF (C, H, W), HF (1, H, W)
+        lf_t = torch.from_numpy(lf_stack)
+        hf_t = torch.from_numpy(hf_slice)[None, ...]
         return lf_t, hf_t
