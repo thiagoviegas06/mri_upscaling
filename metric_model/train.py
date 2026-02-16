@@ -117,12 +117,39 @@ def ms_ssim_2d_torch(x, y, window_size=11, sigma=1.5, weights=None):
 
     return ms_ssim
 
+def ssim_2d_torch(x, y, window_size=11, sigma=1.5):
+    # x, y: (N, C, H, W) - single-scale SSIM
+    x = x.clamp(0.0, 1.0)
+    y = y.clamp(0.0, 1.0)
+
+    kernel = _gaussian_kernel_2d(window_size, sigma, x.device, x.dtype)
+    c1 = 0.01 ** 2
+    c2 = 0.03 ** 2
+
+    channels = x.size(1)
+    k = kernel[None, None, ...].repeat(channels, 1, 1, 1)
+    padding = window_size // 2
+
+    mu_x = F.conv2d(x, k, padding=padding, groups=channels)
+    mu_y = F.conv2d(y, k, padding=padding, groups=channels)
+
+    mu_x2 = mu_x.pow(2)
+    mu_y2 = mu_y.pow(2)
+    mu_xy = mu_x * mu_y
+
+    sigma_x2 = F.conv2d(x * x, k, padding=padding, groups=channels) - mu_x2
+    sigma_y2 = F.conv2d(y * y, k, padding=padding, groups=channels) - mu_y2
+    sigma_xy = F.conv2d(x * y, k, padding=padding, groups=channels) - mu_xy
+
+    ssim_map = ((2 * mu_xy + c1) * (2 * sigma_xy + c2)) / ((mu_x2 + mu_y2 + c1) * (sigma_x2 + sigma_y2 + c2))
+    return ssim_map.mean()
+
 def compute_loss(pred, target, ms_weight=0.6):
     l1 = F.l1_loss(pred, target)
-    ms_ssim_val = ms_ssim_2d_torch(pred, target)
+    ssim_val = ssim_2d_torch(pred, target)
     ms_weight = float(ms_weight)
     l1_weight = 1.0 - ms_weight
-    return l1_weight * l1 + ms_weight * (1.0 - ms_ssim_val)
+    return l1_weight * l1 + ms_weight * (1.0 - ssim_val)
 
 def _normalize_2d(x):
     x_min = x.min()
