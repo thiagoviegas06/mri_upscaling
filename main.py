@@ -11,8 +11,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from metric_model.model import RefinerUNet2D, UNet2D
-from metric_model.train import EMA, train_one_epoch, train_one_epoch_refiner, validate, validate_metric
+from model import RefinerUNet2D, UNet2D
+from train import EMA, train_one_epoch, train_one_epoch_refiner, validate, validate_metric
 from preprocessing import MRIPatchDataset
 
 def make_pairs(lf_dir, hf_dir):
