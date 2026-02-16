@@ -180,10 +180,10 @@ def ssim_2d_metric(img1, img2):
 def ms_ssim_2d_metric(img1, img2):
     img1_norm = _normalize_2d(img1)
     img2_norm = _normalize_2d(img2)
-    t1 = torch.from_numpy(img1_norm)[None, None, ...]
-    t2 = torch.from_numpy(img2_norm)[None, None, ...]
-        idxs.append(dim - patch_size)
-    return idxs
+    t1 = torch.from_numpy(img1_norm).to(torch.float32)[None, None, ...]
+    t2 = torch.from_numpy(img2_norm).to(torch.float32)[None, None, ...]
+    with torch.no_grad():
+        return float(ms_ssim_2d_torch(t1, t2).item())
 
 def _gaussian_window_2d(patch_size, sigma=None):
     if sigma is None:

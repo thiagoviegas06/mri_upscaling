@@ -115,10 +115,6 @@ if __name__ == "__main__":
             device,
             patch_size=patch_size,
             stride=patch_size // 2,
-            n_slices=10,  # or make configurable
-            epoch=epoch,
-            group_size=5,  # or make configurable
-            use_ms_ssim=True,
             # stack_size=stack_size,  # if your validate_metric supports it
         )
         ema.restore(stage1, ema_backup)
@@ -176,131 +172,14 @@ if __name__ == "__main__":
                 )
                 break
 
-    if train_refiner:
-        # --- Load best stage1 before training stage2 ---
-        best_ckpt = torch.load(best_path, map_location=device)
-        stage1.load_state_dict(best_ckpt["model"])
-        ema.load_state_dict(best_ckpt["ema"])
-        print(f"Loaded best stage1 from {best_path} (epoch {best_ckpt.get('epoch')})")
-
-        for p in stage1.parameters():
-            p.requires_grad = False
-        stage1.eval()
-
-        num_epochs_stage2 = 30
-        best_val2 = float("-inf")
-        best_epoch2 = 0
-        epochs_no_improve2 = 0
-        patience2 = 10
-        best_refiner_path = os.path.join(save_dir, "best_refiner.ckpt")
-
-        for epoch in range(1, num_epochs_stage2 + 1):
-            train_loss = train_one_epoch_refiner(
-                stage1,
-                ema,
-                refiner,
-                train_loader,
-                optim2,
-                device,
-                scaler=scaler,
-                delta_l1_weight=0.05,
-                ms_weight=ms_weight_final,
-            )
-            val_score, val_ssim, val_ms_ssim, val_psnr, val_slices = validate_metric(
-                stage1,
-                val_pairs,
-                device,
-                ema=ema,
-                refiner=refiner,
-                patch_size=patch_size,
-                stride=patch_size // 2,
-                stack_size=stack_size,
-            )
-
-            if epoch % 5 == 0:
-                epoch_path = os.path.join(save_dir, f"refiner_epoch_{epoch:02d}.ckpt")
-                torch.save(
-                    {
-                        "epoch": epoch,
-                        "stage1": stage1.state_dict(),
-                        "refiner": refiner.state_dict(),
-                        "ema": ema.state_dict(),
-                        "optim": optim2.state_dict(),
-                        "val_score": val_score,
-                        "val_ssim": val_ssim,
-                        "val_ms_ssim": val_ms_ssim,
-                        "val_psnr": val_psnr,
-                    },
-                    epoch_path,
-                )
-                print("Saved refiner checkpoint to:", epoch_path)
-
-            print(
-                f"stage2 epoch {epoch:02d} | train loss: {train_loss:.5f} | val score: {val_score:.5f} "
-                f"(ssim {val_ssim:.5f}, ms_ssim {val_ms_ssim:.5f}, psnr {val_psnr:.2f}, n={val_slices})"
-            )
-
-            if val_score > best_val2:
-                best_val2 = val_score
-                best_epoch2 = epoch
-                epochs_no_improve2 = 0
-                torch.save(
-                    {
-                        "epoch": epoch,
-                        "stage1": stage1.state_dict(),
-                        "refiner": refiner.state_dict(),
-                        "ema": ema.state_dict(),
-                        "optim": optim2.state_dict(),
-                        "val_score": val_score,
-                        "val_ssim": val_ssim,
-                        "val_ms_ssim": val_ms_ssim,
-                        "val_psnr": val_psnr,
-                    },
-                    best_refiner_path,
-                )
-                print("Saved best refiner to:", best_refiner_path)
-            else:
-                epochs_no_improve2 += 1
-                if epochs_no_improve2 >= patience2:
-                    print(
-                        f"Stage2 early stopping at epoch {epoch:02d} (best epoch {best_epoch2:02d}, "
-                        f"score {best_val2:.5f})"
-                    )
-                    break
-
-        best_overall_path = os.path.join(save_dir, "best_overall.ckpt")
-        if best_val2 > best_val:
-            best_refiner_ckpt = torch.load(best_refiner_path, map_location=device)
-            torch.save(
-                {
-                    "stage": 2,
-                    "model": best_refiner_ckpt["stage1"],
-                    "ema": best_refiner_ckpt["ema"],
-                    "refiner": best_refiner_ckpt["refiner"],
-                },
-                best_overall_path,
-            )
-            print("Saved overall best from stage2 to:", best_overall_path)
-        else:
-            best_stage1_ckpt = torch.load(best_path, map_location=device)
-            torch.save(
-                {
-                    "stage": 1,
-                    "model": best_stage1_ckpt["model"],
-                    "ema": best_stage1_ckpt["ema"],
-                },
-                best_overall_path,
-            )
-            print("Saved overall best from stage1 to:", best_overall_path)
-    else:
-        best_overall_path = os.path.join(save_dir, "best_overall.ckpt")
-        best_stage1_ckpt = torch.load(best_path, map_location=device)
-        torch.save(
-            {
-                "stage": 1,
-                "model": best_stage1_ckpt["model"],
-                "ema": best_stage1_ckpt["ema"],
-            },
-            best_overall_path,
-        )
-        print("Saved overall best from stage1 to:", best_overall_path)
+    best_overall_path = os.path.join(save_dir, "best_overall.ckpt")
+    best_stage1_ckpt = torch.load(best_path, map_location=device)
+    torch.save(
+        {
+            "stage": 1,
+            "model": best_stage1_ckpt["model"],
+            "ema": best_stage1_ckpt["ema"],
+        },
+        best_overall_path,
+    )
+    print("Saved overall best from stage1 to:", best_overall_path)
