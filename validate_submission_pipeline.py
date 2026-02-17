@@ -84,6 +84,8 @@ def main():
     pairs = make_pairs("mri_resolution/train/low_field", "mri_resolution/train/high_field")
     if not pairs:
         raise RuntimeError("No LF/HF pairs found for validation.")
+    
+    print(f"Evaluating on all {len(pairs)} pairs\n")
 
     solution = build_solution_df(pairs)
     
@@ -99,7 +101,7 @@ def main():
         model = load_model(ckpt_path, device=device, base=56, stack_size=stack_size)
         
         print(f"  Evaluating {ckpt_path}...")
-        submission = build_submission_df(model, pairs, device=device, patch_size=96, stride=96 // 3, stack_size=stack_size)
+        submission = build_submission_df(model, pairs, device=device, patch_size=96, stride=48, stack_size=stack_size)
         
         score = eval_metric.score(solution, submission, "row_id")
         scores.append((ckpt_path, score))

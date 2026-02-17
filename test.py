@@ -7,7 +7,7 @@ from nibabel.processing import resample_from_to
 
 from model import UNet2_5D
 from preprocessing import preprocess_volume
-from train import predict_volume, _slice_stack
+from train import predict_volume
 from mri_resolution.extract_slices import create_submission_df
 
 
@@ -36,7 +36,9 @@ def get_hf_template(hf_dir="mri_resolution/train/high_field"):
 def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     stack_size = 7  # Match the stack_size used in main.py
-    model = load_model("best.ckpt", device=device, base=56, stack_size=stack_size)
+    # Use best model from training
+    checkpoint_path = "checkpoints_metric/best.ckpt"
+    model = load_model(checkpoint_path, device=device, base=56, stack_size=stack_size)
 
     hf_template = get_hf_template()
 
@@ -50,7 +52,8 @@ def main():
         volume = lf_resampled.get_fdata().astype(np.float32)
         volume = preprocess_volume(volume)
 
-        pred = predict_volume(model, volume, patch_size=96, stride=96 // 3, device=device, stack_size=stack_size)
+        # Use stride=48 to match training (patch_size // 2)
+        pred = predict_volume(model, volume, patch_size=96, stride=48, device=device, stack_size=stack_size)
         pred = np.clip(pred, 0.0, 1.0)
         predictions[sample_id] = pred
 
