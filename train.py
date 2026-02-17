@@ -5,6 +5,7 @@ from torch.amp import autocast
 import torch.nn.functional as F
 
 from preprocessing import load_pair_resample_normalize
+from model import UNet2_5D
 
 
 class EMA:
@@ -19,6 +20,7 @@ class EMA:
             else:
                 self.shadow[name] = param.detach().clone()
 
+
     def apply_to(self, model):
         backup = {k: v.detach().clone() for k, v in model.state_dict().items()}
         model.load_state_dict(self.shadow, strict=False)
@@ -32,17 +34,6 @@ class EMA:
 
     def load_state_dict(self, state):
         self.shadow = {k: v.clone() for k, v in state.items()}
-
-LOSS_WEIGHTS = {
-    "l1": 0.3,
-    "mse": 0.5,
-    "ssim": 0.6,
-}
-
-def _gaussian_kernel_1d(window_size, sigma, device, dtype):
-    coords = torch.arange(window_size, device=device, dtype=dtype) - (window_size - 1) / 2
-    kernel = torch.exp(-(coords ** 2) / (2 * sigma ** 2))
-    return kernel / kernel.sum()
 
 def _gaussian_kernel_2d(window_size, sigma, device, dtype):
     coords = torch.arange(window_size, device=device, dtype=dtype) - (window_size - 1) / 2
@@ -146,10 +137,11 @@ def ssim_2d_torch(x, y, window_size=11, sigma=1.5):
 
 def compute_loss(pred, target, ms_weight=0.6):
     l1 = F.l1_loss(pred, target)
-    ssim_val = ssim_2d_torch(pred, target)
+    # Use MS-SSIM to match competition metric
+    ms_ssim_val = ms_ssim_2d_torch(pred, target)
     ms_weight = float(ms_weight)
     l1_weight = 1.0 - ms_weight
-    return l1_weight * l1 + ms_weight * (1.0 - ssim_val)
+    return l1_weight * l1 + ms_weight * (1.0 - ms_ssim_val)
 
 def _normalize_2d(x):
     x_min = x.min()
@@ -192,6 +184,23 @@ def _gaussian_window_2d(patch_size, sigma=None):
     g1d = np.exp(-(coords ** 2) / (2 * sigma ** 2))
     g2d = g1d[:, None] * g1d[None, :]
     return g2d.astype(np.float32)
+
+def _start_indices(dim, patch_size, stride):
+    if dim <= patch_size:
+        return [0]
+    idxs = list(range(0, dim - patch_size + 1, stride))
+    if idxs[-1] != dim - patch_size:
+        idxs.append(dim - patch_size)
+    return idxs
+
+def psnr_2d_metric(img1, img2):
+    """Compute PSNR between two 2D images."""
+    img1_norm = _normalize_2d(img1)
+    img2_norm = _normalize_2d(img2)
+    mse = np.mean((img1_norm - img2_norm) ** 2)
+    if mse == 0:
+        return float('inf')
+    return float(20 * np.log10(1.0 / np.sqrt(mse)))
 
 def _slice_stack(volume, z_center, stack_size):
     half = stack_size // 2
@@ -267,20 +276,10 @@ def train_one_epoch(model, loader, optim, device, scaler, ema=None, ms_ssim_weig
                 hf_2d = hf
 
             l1 = F.l1_loss(pred_2d, hf_2d)
-
-            ms_ssim_vals = []
-            ssim_vals = []
-            for i in range(pred_2d.shape[0]):
-                x = pred_2d[i, 0].detach().cpu().numpy()
-                y = hf_2d[i, 0].detach().cpu().numpy()
-                if 'ms_ssim_2d_metric' in globals() and ms_ssim_2d_metric is not None:
-                    ms_ssim_vals.append(ms_ssim_2d_metric(y, x))
-                else:
-                    ssim_vals.append(ssim_2d_metric(y, x))
-            if ms_ssim_vals:
-                ms_ssim_loss = 1.0 - float(np.mean(ms_ssim_vals))
-            else:
-                ms_ssim_loss = 1.0 - float(np.mean(ssim_vals))
+            
+            # Use differentiable MS-SSIM directly on tensors (much faster and proper gradients)
+            ms_ssim_val = ms_ssim_2d_torch(pred_2d, hf_2d)
+            ms_ssim_loss = 1.0 - ms_ssim_val
 
             loss = l1_weight * l1 + ms_ssim_weight * ms_ssim_loss
 
@@ -299,50 +298,8 @@ def train_one_epoch(model, loader, optim, device, scaler, ema=None, ms_ssim_weig
 
     return running / max(1, len(loader))
 
-def train_one_epoch_refiner(stage1, ema_stage1, refiner, loader, optim, device, scaler=None, delta_l1_weight=0.01, ms_weight=0.6):
-    stage1.eval()
-    refiner.train()
-    running = 0.0
-
-    for lf, hf in loader:
-        lf = lf.to(device, non_blocking=True)
-        hf = hf.to(device, non_blocking=True)
-
-        optim.zero_grad(set_to_none=True)
-
-        with torch.no_grad():
-            ema_backup = None
-            if ema_stage1 is not None:
-                ema_backup = ema_stage1.apply_to(stage1)
-            y1 = stage1(lf)
-            if ema_stage1 is not None:
-                ema_stage1.restore(stage1, ema_backup)
-
-        delta = refiner(torch.cat([lf, y1], dim=1))
-
-        limit = 0.2  # try 0.2 first; also test 0.1
-        delta = limit * torch.tanh(delta / limit)
-
-        yhat = y1 + delta
-
-        loss_main = compute_loss(yhat, hf, ms_weight=ms_weight)
-        loss_reg = delta_l1_weight * delta.abs().mean()
-        loss = loss_main + loss_reg
-
-        if scaler is not None and device == "cuda":
-            scaler.scale(loss).backward()
-            scaler.step(optim)
-            scaler.update()
-        else:
-            loss.backward()
-            optim.step()
-
-        running += loss.item()
-
-    return running / max(1, len(loader))
-
 @torch.no_grad()
-def validate(model, loader, device, ms_weight=0.6):
+def validate(model, loader, device, ms_weight=0.9):
     model.eval()
     running = 0.0
 

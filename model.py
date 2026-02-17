@@ -1,19 +1,6 @@
 import torch
 import torch.nn as nn
 
-class DoubleConv(nn.Module):
-    def __init__(self, in_ch, out_ch):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Conv2d(in_ch, out_ch, 3, padding=1),
-            nn.InstanceNorm2d(out_ch),
-            nn.LeakyReLU(0.1, inplace=True),
-            nn.Conv2d(out_ch, out_ch, 3, padding=1),
-            nn.InstanceNorm2d(out_ch),
-            nn.LeakyReLU(0.1, inplace=True),
-        )
-    def forward(self, x): return self.net(x)
-
 class ResidualBlock(nn.Module):
     def __init__(self, in_ch, out_ch):
         super().__init__()
@@ -53,50 +40,6 @@ class AttentionGate2D(nn.Module):
         f = self.act(self.norm(theta_x + phi_g))
         attn = self.sigmoid(self.psi(f))
         return x * attn
-
-class UNet2D(nn.Module):
-    def __init__(self, in_ch=1, out_ch=1, base=32, dropout_p=0.1):
-        super().__init__()
-        self.enc1 = ResidualBlock(in_ch, base)
-        self.pool1 = nn.MaxPool2d(2)
-        self.enc2 = ResidualBlock(base, base*2)
-        self.pool2 = nn.MaxPool2d(2)
-        self.enc3 = ResidualBlock(base*2, base*4)
-        self.pool3 = nn.MaxPool2d(2)
-
-        self.bott = ResidualBlock(base*4, base*8)
-        self.bott_dropout = nn.Dropout2d(p=dropout_p)
-
-        self.up3 = nn.ConvTranspose2d(base*8, base*4, 2, stride=2)
-        self.att3 = AttentionGate2D(base*4, base*4, base*2)
-        self.dec3 = ResidualBlock(base*8, base*4)
-        self.up2 = nn.ConvTranspose2d(base*4, base*2, 2, stride=2)
-        self.att2 = AttentionGate2D(base*2, base*2, base)
-        self.dec2 = ResidualBlock(base*4, base*2)
-        self.up1 = nn.ConvTranspose2d(base*2, base, 2, stride=2)
-        self.att1 = AttentionGate2D(base, base, base//2)
-        self.dec1 = ResidualBlock(base*2, base)
-
-        self.out = nn.Conv2d(base, out_ch, 1)
-
-    def forward(self, x):
-        e1 = self.enc1(x)
-        e2 = self.enc2(self.pool1(e1))
-        e3 = self.enc3(self.pool2(e2))
-        b  = self.bott(self.pool3(e3))
-        b  = self.bott_dropout(b)
-
-        d3 = self.up3(b)
-        e3_g = self.att3(e3, d3)
-        d3 = self.dec3(torch.cat([d3, e3_g], dim=1))
-        d2 = self.up2(d3)
-        e2_g = self.att2(e2, d2)
-        d2 = self.dec2(torch.cat([d2, e2_g], dim=1))
-        d1 = self.up1(d2)
-        e1_g = self.att1(e1, d1)
-        d1 = self.dec1(torch.cat([d1, e1_g], dim=1))
-
-        return self.out(d1)
 
 class RefinerUNet2D(nn.Module):
     """
@@ -145,3 +88,53 @@ class RefinerUNet2D(nn.Module):
         d1 = self.dec1(torch.cat([d1, e1_g], dim=1))  # (B, base, ...)
 
         return self.out(d1)            # (B, out_ch, H, W)
+
+class UNet2_5D(nn.Module):
+    """
+    2.5D UNet: Uses 2D convolutions on stacked adjacent slices.
+    Input: (B, stack_size, H, W) - stack of adjacent slices as channels
+    Output: (B, out_ch, H, W) - predicted center slice
+    This is the same architecture as UNet2D but named explicitly for 2.5D usage.
+    """
+    def __init__(self, in_ch=1, out_ch=1, base=32, dropout_p=0.1):
+        super().__init__()
+        self.enc1 = ResidualBlock(in_ch, base)
+        self.pool1 = nn.MaxPool2d(2)
+        self.enc2 = ResidualBlock(base, base*2)
+        self.pool2 = nn.MaxPool2d(2)
+        self.enc3 = ResidualBlock(base*2, base*4)
+        self.pool3 = nn.MaxPool2d(2)
+
+        self.bott = ResidualBlock(base*4, base*8)
+        self.bott_dropout = nn.Dropout2d(p=dropout_p)
+
+        self.up3 = nn.ConvTranspose2d(base*8, base*4, 2, stride=2)
+        self.att3 = AttentionGate2D(base*4, base*4, base*2)
+        self.dec3 = ResidualBlock(base*8, base*4)
+        self.up2 = nn.ConvTranspose2d(base*4, base*2, 2, stride=2)
+        self.att2 = AttentionGate2D(base*2, base*2, base)
+        self.dec2 = ResidualBlock(base*4, base*2)
+        self.up1 = nn.ConvTranspose2d(base*2, base, 2, stride=2)
+        self.att1 = AttentionGate2D(base, base, base//2)
+        self.dec1 = ResidualBlock(base*2, base)
+
+        self.out = nn.Conv2d(base, out_ch, 1)
+
+    def forward(self, x):
+        e1 = self.enc1(x)
+        e2 = self.enc2(self.pool1(e1))
+        e3 = self.enc3(self.pool2(e2))
+        b  = self.bott(self.pool3(e3))
+        b  = self.bott_dropout(b)
+
+        d3 = self.up3(b)
+        e3_g = self.att3(e3, d3)
+        d3 = self.dec3(torch.cat([d3, e3_g], dim=1))
+        d2 = self.up2(d3)
+        e2_g = self.att2(e2, d2)
+        d2 = self.dec2(torch.cat([d2, e2_g], dim=1))
+        d1 = self.up1(d2)
+        e1_g = self.att1(e1, d1)
+        d1 = self.dec1(torch.cat([d1, e1_g], dim=1))
+
+        return self.out(d1)

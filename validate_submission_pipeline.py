@@ -6,15 +6,15 @@ import nibabel as nib
 import torch
 from nibabel.processing import resample_from_to
 
-from model import UNet3D
+from model import UNet2_5D
 from preprocessing import preprocess_volume
+from train import predict_volume
 from mri_resolution.extract_slices import volume_to_submission_rows
 from mri_resolution import metric as eval_metric
-from test import predict_volume
 
 
-def load_model(checkpoint_path, device="cpu", base=56, use_ema=True):
-    model = UNet3D(base=base).to(device)
+def load_model(checkpoint_path, device="cpu", base=56, use_ema=True, stack_size=7):
+    model = UNet2_5D(in_ch=stack_size, base=base).to(device)
     ckpt = torch.load(checkpoint_path, map_location=device)
     if isinstance(ckpt, dict) and use_ema and "ema" in ckpt:
         state = ckpt["ema"]
@@ -47,11 +47,11 @@ def build_solution_df(pairs):
     return df
 
 
-def ensemble_predict(models, volume, patch_size=96, stride=48, device="cpu"):
+def ensemble_predict(models, volume, patch_size=96, stride=48, device="cpu", stack_size=7):
     """Predict and average across multiple models."""
     predictions = []
     for model in models:
-        pred = predict_volume(model, volume, patch_size=patch_size, stride=stride, device=device)
+        pred = predict_volume(model, volume, patch_size=patch_size, stride=stride, device=device, stack_size=stack_size)
         predictions.append(pred)
     
     # Average predictions
@@ -59,7 +59,7 @@ def ensemble_predict(models, volume, patch_size=96, stride=48, device="cpu"):
     return ensemble_pred
 
 
-def build_submission_df(model, pairs, device, patch_size=96, stride=48):
+def build_submission_df(model, pairs, device, patch_size=96, stride=48, stack_size=7):
     rows = []
     for lf_path, hf_path in pairs:
         sample_id = Path(lf_path).name.replace("_lowfield.nii", "")
@@ -69,13 +69,13 @@ def build_submission_df(model, pairs, device, patch_size=96, stride=48):
         volume = lf_resampled.get_fdata().astype(np.float32)
         volume = preprocess_volume(volume)
 
-        pred = predict_volume(model, volume, patch_size=patch_size, stride=stride, device=device)
+        pred = predict_volume(model, volume, patch_size=patch_size, stride=stride, device=device, stack_size=stack_size)
         pred = np.clip(pred, 0.0, 1.0)
         rows.extend(volume_to_submission_rows(pred, sample_id))
     return pd.DataFrame(rows)
 
 
-def build_submission_df_ensemble(models, pairs, device, patch_size=96, stride=48):
+def build_submission_df_ensemble(models, pairs, device, patch_size=96, stride=48, stack_size=7):
     rows = []
     for lf_path, hf_path in pairs:
         sample_id = Path(lf_path).name.replace("_lowfield.nii", "")
@@ -86,7 +86,7 @@ def build_submission_df_ensemble(models, pairs, device, patch_size=96, stride=48
         volume = lf_resampled.get_fdata().astype(np.float32)
         volume = preprocess_volume(volume)
 
-        pred = ensemble_predict(models, volume, patch_size=patch_size, stride=stride, device=device)
+        pred = ensemble_predict(models, volume, patch_size=patch_size, stride=stride, device=device, stack_size=stack_size)
         pred = np.clip(pred, 0.0, 1.0)
         rows.extend(volume_to_submission_rows(pred, sample_id))
     return pd.DataFrame(rows)
@@ -94,6 +94,7 @@ def build_submission_df_ensemble(models, pairs, device, patch_size=96, stride=48
 
 def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    stack_size = 7  # Match the stack_size used in main.py
     
     # Set to True to use ensemble, False for single model
     use_ensemble = True
@@ -111,7 +112,7 @@ def main():
         models = []
         for ckpt_path in checkpoint_paths:
             if Path(ckpt_path).exists():
-                model = load_model(ckpt_path, device=device, base=56)
+                model = load_model(ckpt_path, device=device, base=56, stack_size=stack_size)
                 models.append(model)
                 print(f"  Loaded {ckpt_path}")
             else:
@@ -123,7 +124,7 @@ def main():
         print(f"Ensemble size: {len(models)} models\n")
     else:
         checkpoint = "checkpoints_metric/best.ckpt"
-        model = load_model(checkpoint, device=device, base=56)
+        model = load_model(checkpoint, device=device, base=56, stack_size=stack_size)
         print(f"Using single model: {checkpoint}\n")
 
     pairs = make_pairs("mri_resolution/train/low_field", "mri_resolution/train/high_field")
@@ -133,9 +134,9 @@ def main():
     solution = build_solution_df(pairs)
     
     if use_ensemble:
-        submission = build_submission_df_ensemble(models, pairs, device=device, patch_size=96, stride=96 // 3)
+        submission = build_submission_df_ensemble(models, pairs, device=device, patch_size=96, stride=96 // 3, stack_size=stack_size)
     else:
-        submission = build_submission_df(model, pairs, device=device, patch_size=96, stride=96 // 3)
+        submission = build_submission_df(model, pairs, device=device, patch_size=96, stride=96 // 3, stack_size=stack_size)
 
     score = eval_metric.score(solution, submission, "row_id")
     print(f"\nValidation score (submission pipeline): {score:.5f}")

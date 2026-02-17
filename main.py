@@ -11,8 +11,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from model import RefinerUNet2D, UNet2D
-from train import EMA, train_one_epoch, train_one_epoch_refiner, validate, validate_metric
+from model import UNet2_5D
+from train import EMA, train_one_epoch, validate, validate_metric
 from preprocessing import MRIPatchDataset
 
 def make_pairs(lf_dir, hf_dir):
@@ -37,12 +37,12 @@ def split_pairs(pairs, val_frac=0.2, seed=42):
 if __name__ == "__main__":
     patch_size = 96
     stack_size = 7
-    train_refiner = False
     warmup_epochs = 12
-    ms_ssim_weight_start = 1.0  # weight for (1 - MS-SSIM) in loss
-    l1_weight_start = 1.0       # weight for L1 in loss
-    ms_ssim_weight_final = 1.0
-    l1_weight_final = 1.0
+    # Since competition metric is MS-SSIM, weight it heavily
+    ms_ssim_weight_start = 0.8  # weight for (1 - MS-SSIM) in loss
+    l1_weight_start = 0.2       # weight for L1 in loss (helps with convergence)
+    ms_ssim_weight_final = 0.9  # Final: mostly MS-SSIM since that's the metric
+    l1_weight_final = 0.1
 
     pairs = make_pairs("/scratch/tjv235/pytorch-example/mri_upscaling/mri_resolution/train/low_field", "/scratch/tjv235/pytorch-example/mri_upscaling/mri_resolution/train/high_field")
     train_pairs, val_pairs = split_pairs(pairs, val_frac=0.2, seed=42)
@@ -73,11 +73,9 @@ if __name__ == "__main__":
     val_loader   = DataLoader(val_ds,   batch_size=2, shuffle=False, num_workers=2, pin_memory=True)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    stage1 = UNet2D(in_ch=stack_size, base=56).to(device)
-    refiner = RefinerUNet2D(in_ch=stack_size + 1, out_ch=1, base=24, dropout_p=0.0).to(device)  # 7+1=8 for refiner
+    stage1 = UNet2_5D(in_ch=stack_size, base=56).to(device)
 
     optim1 = torch.optim.AdamW(stage1.parameters(), lr=1e-4, weight_decay=1e-4)
-    optim2 = torch.optim.AdamW(refiner.parameters(), lr=3e-5, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optim1,
         mode="max",
@@ -115,7 +113,7 @@ if __name__ == "__main__":
             device,
             patch_size=patch_size,
             stride=patch_size // 2,
-            # stack_size=stack_size,  # if your validate_metric supports it
+            stack_size=stack_size,
         )
         ema.restore(stage1, ema_backup)
 
@@ -139,7 +137,7 @@ if __name__ == "__main__":
 
         print(
             f"epoch {epoch:02d} | train loss: {train_loss:.5f} | val loss: {val_loss:.5f} "
-            f"| val score: {val_score:.5f} (ms-ssim {val_ms_ssim:.5f}, ssim {val_ssim:.5f}, psnr {val_psnr:.2f}, n={val_slices}) "
+            f"| val MS-SSIM: {val_score:.5f} (SSIM: {val_ssim:.5f}, PSNR: {val_psnr:.2f}, n={val_slices}) "
             f"| ms_ssim_w {ms_ssim_weight:.2f} l1_w {l1_weight:.2f}"
         )
 

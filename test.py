@@ -5,13 +5,14 @@ import nibabel as nib
 import torch
 from nibabel.processing import resample_from_to
 
-from model import UNet3D
+from model import UNet2_5D
 from preprocessing import preprocess_volume
+from train import predict_volume, _slice_stack
 from mri_resolution.extract_slices import create_submission_df
 
 
-def load_model(checkpoint_path="best.ckpt", device="cpu", base=56, use_ema=True):
-    model = UNet3D(base=base).to(device)
+def load_model(checkpoint_path="best.ckpt", device="cpu", base=56, use_ema=True, stack_size=7):
+    model = UNet2_5D(in_ch=stack_size, base=base).to(device)
     ckpt = torch.load(checkpoint_path, map_location=device)
     if isinstance(ckpt, dict) and use_ema and "ema" in ckpt:
         state = ckpt["ema"]
@@ -22,46 +23,6 @@ def load_model(checkpoint_path="best.ckpt", device="cpu", base=56, use_ema=True)
     return model
 
 
-def _start_indices(dim, patch_size, stride):
-    if dim <= patch_size:
-        return [0]
-    idxs = list(range(0, dim - patch_size + 1, stride))
-    if idxs[-1] != dim - patch_size:
-        idxs.append(dim - patch_size)
-    return idxs
-
-
-def _gaussian_window_3d(patch_size, sigma=None):
-    if sigma is None:
-        sigma = patch_size / 5.0
-    coords = np.arange(patch_size) - (patch_size - 1) / 2.0
-    g1d = np.exp(-(coords ** 2) / (2 * sigma ** 2))
-    g3d = g1d[:, None, None] * g1d[None, :, None] * g1d[None, None, :]
-    return g3d.astype(np.float32)
-
-
-def predict_volume(model, volume, patch_size=96, stride=48, device="cpu"):
-    x_starts = _start_indices(volume.shape[0], patch_size, stride)
-    y_starts = _start_indices(volume.shape[1], patch_size, stride)
-    z_starts = _start_indices(volume.shape[2], patch_size, stride)
-
-    accum = np.zeros_like(volume, dtype=np.float32)
-    weight = np.zeros_like(volume, dtype=np.float32)
-    gaussian_window = _gaussian_window_3d(patch_size)
-
-    with torch.no_grad():
-        for x in x_starts:
-            for y in y_starts:
-                for z in z_starts:
-                    patch = volume[x:x + patch_size, y:y + patch_size, z:z + patch_size]
-                    patch_t = torch.from_numpy(patch)[None, None, ...].to(device)
-                    pred_t = model(patch_t)
-                    pred = pred_t.squeeze(0).squeeze(0).cpu().numpy()
-
-                    accum[x:x + patch_size, y:y + patch_size, z:z + patch_size] += pred * gaussian_window
-                    weight[x:x + patch_size, y:y + patch_size, z:z + patch_size] += gaussian_window
-
-    return accum / np.maximum(weight, 1e-8)
 
 
 def get_hf_template(hf_dir="mri_resolution/train/high_field"):
@@ -74,7 +35,8 @@ def get_hf_template(hf_dir="mri_resolution/train/high_field"):
 
 def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = load_model("best.ckpt", device=device, base=56)
+    stack_size = 7  # Match the stack_size used in main.py
+    model = load_model("best.ckpt", device=device, base=56, stack_size=stack_size)
 
     hf_template = get_hf_template()
 
@@ -88,7 +50,7 @@ def main():
         volume = lf_resampled.get_fdata().astype(np.float32)
         volume = preprocess_volume(volume)
 
-        pred = predict_volume(model, volume, patch_size=96, stride=96 // 3, device=device)
+        pred = predict_volume(model, volume, patch_size=96, stride=96 // 3, device=device, stack_size=stack_size)
         pred = np.clip(pred, 0.0, 1.0)
         predictions[sample_id] = pred
 
