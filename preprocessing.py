@@ -5,6 +5,17 @@ from torch.utils.data import Dataset
 import nibabel as nib
 from nibabel.processing import resample_from_to
 
+
+def fg_frac_np(patch2d: np.ndarray, thresh: float = 0.05) -> float:
+    # patch2d: (H,W) float32
+    return float((patch2d > thresh).mean())
+
+def energy_np(patch2d: np.ndarray) -> float:
+    # simple gradient/edge energy proxy
+    gx = np.abs(np.diff(patch2d, axis=0)).mean()
+    gy = np.abs(np.diff(patch2d, axis=1)).mean()
+    return float(gx + gy)
+
 # ---------- preprocessing ----------
 def preprocess_volume(volume, clip_percentiles=(1, 99), eps=1e-8):
     lo, hi = np.percentile(volume, clip_percentiles)
@@ -37,12 +48,6 @@ def load_pair_resample_normalize(lf_path, hf_path, interp_order=1):
 
     lf, hf = preprocess_pair_from_lf_stats(lf, hf)
 
-    min_lf = lf.min()
-    max_lf = lf.max()
-    min_hf = hf.min()
-    max_hf = hf.max()
-
-    print(f"LF min: {min_lf}, HF min: {min_hf}, LF max: {max_lf}, HF max: {max_hf}")
     if lf.shape != hf.shape:
         raise ValueError(f"LF/HF shape mismatch: {lf.shape} vs {hf.shape}")
 
@@ -157,32 +162,40 @@ class MRIPatchDataset(Dataset):
         vol_idx = idx // self.patches_per_volume
         lf, hf = self._get_volume_pair(vol_idx)
 
-        # random slice
-        z = random_z_index(lf.shape, self.stack_size)
+        # ---- smart sampling params ----
+        max_tries = 20          # how many random attempts before we give up
+        fg_thresh = 0.10        # require at least 10% foreground in HF patch
+        energy_thresh = 0.01    # require some structure (tune this!)
+        keep_bg_prob = 0.15     # still keep some background patches
 
-        # random XY location
-        x, y = random_xy_coords(lf.shape, self.patch_size)
+        chosen = None
+        last_candidate = None
 
-        # extract 2.5D stack
-        lf_stack = extract_slice_stack(
-            lf, x, y, z,
-            self.patch_size,
-            self.stack_size
-        )
+        for _ in range(max_tries):
+            z = random_z_index(lf.shape, self.stack_size)
+            x, y = random_xy_coords(lf.shape, self.patch_size)
 
-        # extract center HF slice
-        hf_slice = extract_xy_patch(
-            hf, x, y, z,
-            self.patch_size
-        )
+            lf_stack = extract_slice_stack(lf, x, y, z, self.patch_size, self.stack_size)
+            hf_slice = extract_xy_patch(hf, x, y, z, self.patch_size)
 
-        # to torch
-        lf_t = torch.from_numpy(lf_stack)          # (C, H, W)
-        hf_t = torch.from_numpy(hf_slice)[None]    # (1, H, W)
+            last_candidate = (lf_stack, hf_slice)
 
-        #fraction of foregound pixels
-        lf_fg_frac = compute_foreground_mask(lf_stack).mean()
-        hf_fg_frac = compute_foreground_mask(hf_slice).mean()
-        print(f"LF foreground fraction: {lf_fg_frac}, HF foreground fraction: {hf_fg_frac}")
+            # compute “informativeness” on HF target patch
+            fg = fg_frac_np(hf_slice, thresh=0.05)
+            en = energy_np(hf_slice)
+
+            # accept if informative OR keep-bg coin flip
+            if (fg >= fg_thresh and en >= energy_thresh) or (random.random() < keep_bg_prob):
+                chosen = (lf_stack, hf_slice)
+                break
+
+        if chosen is None:
+            # fallback: return the last sampled candidate so __getitem__ always succeeds
+            lf_stack, hf_slice = last_candidate
+        else:
+            lf_stack, hf_slice = chosen
+
+        lf_t = torch.from_numpy(lf_stack)        # (C, H, W)
+        hf_t = torch.from_numpy(hf_slice)[None]  # (1, H, W)
 
         return lf_t, hf_t
