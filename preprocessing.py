@@ -175,13 +175,30 @@ class MRIPatchDataset(Dataset):
         vol_idx = idx // self.patches_per_volume
         lf, hf = self._get_volume_pair(vol_idx)
 
-        debug_dict = None  # will fill if self.debug
+        debug_dict = None
+
+        # configurable constants
+        fg_intensity_thresh = 0.05  # pixel intensity threshold used to compute fg fraction
 
         if self.sample_strategy == "filtered":
             chosen = None
             last = None
             tries = 0
             accepted_reason = None
+
+            # ---- Decide upfront what kind of patch we want this time ----
+            # keep_bg_prob now means "fraction of returned samples that are background"
+            want_bg = (random.random() < self.keep_bg_prob)
+
+            def is_bg(fg, en):
+                # stricter definition of background (tunable)
+                return (fg < fg_intensity_thresh) and (en < self.energy_thresh)
+
+            def is_informative(fg, en):
+                return (fg >= self.fg_thresh) and (en >= self.energy_thresh)
+
+            target_check = is_bg if want_bg else is_informative
+            target_name  = "keep_bg" if want_bg else "informative"
 
             for _ in range(self.max_tries):
                 tries += 1
@@ -192,26 +209,21 @@ class MRIPatchDataset(Dataset):
                 hf_slice = extract_xy_patch(hf, x, y, z, self.patch_size)
 
                 en = energy_np(hf_slice)
-                fg = fg_frac_np(hf_slice, thresh=0.05)  # intensity threshold
+                fg = fg_frac_np(hf_slice, thresh=fg_intensity_thresh)
 
                 last = (lf_stack, hf_slice, z, x, y, fg, en)
 
-                is_informative = (fg >= self.fg_thresh and en >= self.energy_thresh)
-
-                if is_informative:
+                if target_check(fg, en):
                     chosen = (lf_stack, hf_slice, z, x, y, fg, en)
-                    accepted_reason = "informative"
-                    break
-
-                # keep some non-informative samples
-                if random.random() < self.keep_bg_prob:
-                    chosen = (lf_stack, hf_slice, z, x, y, fg, en)
-                    accepted_reason = "keep_bg"
+                    accepted_reason = target_name
                     break
 
             if chosen is None:
+                # fallback behavior:
+                # - if we failed to find target type, return last candidate but label it
                 lf_stack, hf_slice, z, x, y, fg, en = last
-                accepted_reason = "fallback"
+                accepted_reason = f"fallback_{target_name}"
+
             else:
                 lf_stack, hf_slice, z, x, y, fg, en = chosen
 
@@ -227,8 +239,8 @@ class MRIPatchDataset(Dataset):
             tries = 1
             accepted_reason = "random"
 
-        lf_t = torch.from_numpy(lf_stack).float()         # (C, H, W)
-        hf_t = torch.from_numpy(hf_slice)[None].float()   # (1, H, W)
+        lf_t = torch.from_numpy(lf_stack).float()
+        hf_t = torch.from_numpy(hf_slice)[None].float()
 
         if getattr(self, "debug", False):
             debug_dict = {
@@ -244,6 +256,3 @@ class MRIPatchDataset(Dataset):
             return lf_t, hf_t, debug_dict
 
         return lf_t, hf_t
-
-        # Option B (recommended for debugging + slice finetune):
-        # return lf_t, hf_t, vol_idx, z, x, y

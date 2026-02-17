@@ -37,12 +37,12 @@ def split_pairs(pairs, val_frac=0.2, seed=42):
 if __name__ == "__main__":
     patch_size = 96
     stack_size = 7
-    warmup_epochs = 12
+    warmup_epochs = 20
     # Since competition metric is MS-SSIM, weight it heavily
-    ms_ssim_weight_start = 0.8  # weight for (1 - MS-SSIM) in loss
-    l1_weight_start = 0.2       # weight for L1 in loss (helps with convergence)
-    ms_ssim_weight_final = 0.9  # Final: mostly MS-SSIM since that's the metric
-    l1_weight_final = 0.1
+    ms_ssim_weight_start = 0.7  # weight for (1 - MS-SSIM) in loss
+    l1_weight_start = 0.3      # weight for L1 in loss (helps with convergence)
+    ms_ssim_weight_final = 0.85  # Final: mostly MS-SSIM since that's the metric
+    l1_weight_final = 0.15
 
     pairs = make_pairs("/scratch/tjv235/pytorch-example/mri_upscaling/mri_resolution/train/low_field", 
     "/scratch/tjv235/pytorch-example/mri_upscaling/mri_resolution/train/high_field")
@@ -77,7 +77,7 @@ if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
     stage1 = UNet2_5D(in_ch=stack_size, base=56).to(device)
 
-    optim1 = torch.optim.AdamW(stage1.parameters(), lr=1e-4, weight_decay=1e-4)
+    optim1 = torch.optim.AdamW(stage1.parameters(), lr=1e-4, weight_decay=1e-5)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optim1,
         mode="max",
