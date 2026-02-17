@@ -11,6 +11,21 @@ def preprocess_volume(volume, clip_percentiles=(1, 99), eps=1e-8):
     volume = np.clip(volume, lo, hi)
     return ((volume - lo) / (hi - lo + eps)).astype(np.float32)
 
+def preprocess_pair_from_lf_stats(lf, hf, p_low=1, p_high=99, eps=1e-6):
+    lo, hi = np.percentile(lf, [p_low, p_high])
+    if hi <= lo + eps:
+        # degenerate / near-constant volume fallback
+        lo, hi = float(np.min(lf)), float(np.max(lf))
+        if hi <= lo + eps:
+            return np.zeros_like(lf, np.float32), np.zeros_like(hf, np.float32)
+
+    lf_c = np.clip(lf, lo, hi)
+    hf_c = np.clip(hf, lo, hi)
+
+    lf_n = (lf_c - lo) / (hi - lo + eps)
+    hf_n = (hf_c - lo) / (hi - lo + eps)
+    return lf_n.astype(np.float32), hf_n.astype(np.float32)
+
 def load_pair_resample_normalize(lf_path, hf_path, interp_order=1):
     lf_img = nib.load(lf_path)
     hf_img = nib.load(hf_path)
@@ -20,8 +35,7 @@ def load_pair_resample_normalize(lf_path, hf_path, interp_order=1):
     lf = lf_resampled_img.get_fdata().astype(np.float32)
     hf = hf_img.get_fdata().astype(np.float32)
 
-    lf = preprocess_volume(lf)
-    hf = preprocess_volume(hf)
+    lf, hf = preprocess_pair_from_lf_stats(lf, hf)
 
     return lf, hf  # numpy arrays, same shape (179,221,200)
 
