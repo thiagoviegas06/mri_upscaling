@@ -5,14 +5,14 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
+
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from preprocessing import MRIPatchDataset
-from preprocessing import make_pairs, split_pairs
+from data_utils import make_pairs, split_pairs
 
 
 def fg_frac(hf_patch: torch.Tensor, thresh: float = 0.05) -> float:
