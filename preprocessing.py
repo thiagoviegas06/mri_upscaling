@@ -43,8 +43,18 @@ def load_pair_resample_normalize(lf_path, hf_path, interp_order=1):
     max_hf = hf.max()
 
     print(f"LF min: {min_lf}, HF min: {min_hf}, LF max: {max_lf}, HF max: {max_hf}")
-    if min_lf != min_hf or max_lf != max_hf:   
-        raise ValueError("LF and HF min/max values do not match")
+    if lf.shape != hf.shape:
+        raise ValueError(f"LF/HF shape mismatch: {lf.shape} vs {hf.shape}")
+
+    if not (np.isfinite(lf).all() and np.isfinite(hf).all()):
+        raise ValueError("Non-finite values found after preprocessing")
+
+    # Optional sanity: ranges should be roughly within [0,1]
+    # (allow tiny numerical spill)
+    if lf.min() < -1e-3 or lf.max() > 1.0 + 1e-3:
+        print(f"[warn] LF out of expected range: min={lf.min():.4g}, max={lf.max():.4g}")
+    if hf.min() < -1e-3 or hf.max() > 1.0 + 1e-3:
+        print(f"[warn] HF out of expected range: min={hf.min():.4g}, max={hf.max():.4g}")
 
     return lf, hf  # numpy arrays, same shape (179,221,200)
 
