@@ -41,8 +41,8 @@ if __name__ == "__main__":
     stack_size = 7
 
     pairs = make_pairs(
-        "/scratch/tjv235/pytorch-example/mri_upscaling/mri_resolution/train/low_field",
-        "/scratch/tjv235/pytorch-example/mri_upscaling/mri_resolution/train/high_field",
+        "./mri_resolution/train/low_field",
+        "./mri_resolution/train/high_field",
     )
     train_pairs, val_pairs = split_pairs(pairs, val_frac=0.2, seed=42)
 
@@ -52,6 +52,8 @@ if __name__ == "__main__":
         patches_per_volume=64,
         cache_volumes=True,
         stack_size=stack_size,
+        sample_strategy="filtered",
+        debug=True,
     )
     val_ds = MRIPatchDataset(
         val_pairs,
@@ -59,6 +61,7 @@ if __name__ == "__main__":
         patches_per_volume=16,
         cache_volumes=True,
         stack_size=stack_size,
+        debug=True,
     )
 
     # -------------------------
@@ -78,7 +81,9 @@ if __name__ == "__main__":
         print("\n====================")
         print(f"{name} samples:")
         for _ in range(5):
-            lf_t, hf_t = ds[random.randint(0, len(ds) - 1)]
+            lf_t, hf_t, debug_dict = ds[random.randint(0, len(ds) - 1)]
+            if debug_dict is not None:
+                print(f"  reason={debug_dict['reason']}  tries={debug_dict['tries']}")
             print(
                 f"  lf {tuple(lf_t.shape)}  hf {tuple(hf_t.shape)}  "
                 f"lf[min,max]=({lf_t.min():.4f},{lf_t.max():.4f})  "
@@ -89,12 +94,18 @@ if __name__ == "__main__":
             )
 
     # distributions over many samples (train)
+    from collections import Counter
+    reason_counts = Counter()
+    tries_list = []
     energies = []
     fgs = []
     for _ in range(1000):
-        _, hf_t = train_ds[random.randint(0, len(train_ds) - 1)]
+        lf_t, hf_t, debug_dict = train_ds[random.randint(0, len(train_ds) - 1)]
         fgs.append(fg_frac(hf_t))
         energies.append(patch_energy(hf_t))
+        if debug_dict is not None:
+            reason_counts[debug_dict['reason']] += 1
+            tries_list.append(debug_dict['tries'])
 
     fgs = np.asarray(fgs, dtype=np.float32)
     energies = np.asarray(energies, dtype=np.float32)
@@ -113,3 +124,6 @@ if __name__ == "__main__":
         f"p50={np.percentile(fgs,50):.3f}  "
         f"p90={np.percentile(fgs,90):.3f}"
     )
+    print("Reason counts:", dict(reason_counts))
+    if tries_list:
+        print(f"Avg tries: {sum(tries_list)/len(tries_list):.2f}  max tries: {max(tries_list)}")

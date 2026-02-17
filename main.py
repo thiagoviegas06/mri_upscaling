@@ -44,7 +44,9 @@ if __name__ == "__main__":
     ms_ssim_weight_final = 0.9  # Final: mostly MS-SSIM since that's the metric
     l1_weight_final = 0.1
 
-    pairs = make_pairs("/scratch/tjv235/pytorch-example/mri_upscaling/mri_resolution/train/low_field", "/scratch/tjv235/pytorch-example/mri_upscaling/mri_resolution/train/high_field")
+    pairs = make_pairs("/scratch/tjv235/pytorch-example/mri_upscaling/mri_resolution/train/low_field", 
+    "/scratch/tjv235/pytorch-example/mri_upscaling/mri_resolution/train/high_field")
+    
     train_pairs, val_pairs = split_pairs(pairs, val_frac=0.2, seed=42)
 
     print("Num pairs:", len(pairs))
@@ -58,8 +60,8 @@ if __name__ == "__main__":
         patch_size=patch_size,
         patches_per_volume=64,
         cache_volumes=True,
-        augment=True,
         stack_size=stack_size,
+        sample_strategy="filtered",
     )
     val_ds   = MRIPatchDataset(
         val_pairs,
@@ -69,8 +71,8 @@ if __name__ == "__main__":
         stack_size=stack_size,
     )
 
-    train_loader = DataLoader(train_ds, batch_size=2, shuffle=True,  num_workers=4, pin_memory=True)
-    val_loader   = DataLoader(val_ds,   batch_size=2, shuffle=False, num_workers=2, pin_memory=True)
+    train_loader = DataLoader(train_ds, batch_size=2, shuffle=True, num_workers=0, pin_memory=True)
+    val_loader   = DataLoader(val_ds,   batch_size=2, shuffle=False, num_workers=0, pin_memory=True)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     stage1 = UNet2_5D(in_ch=stack_size, base=56).to(device)
@@ -96,12 +98,14 @@ if __name__ == "__main__":
 
     num_epochs = 40
     for epoch in range(1, num_epochs + 1):
-        if epoch <= warmup_epochs:
-            ms_ssim_weight = ms_ssim_weight_start + (ms_ssim_weight_final - ms_ssim_weight_start) * (epoch / warmup_epochs)
-            l1_weight = l1_weight_start + (l1_weight_final - l1_weight_start) * (epoch / warmup_epochs)
+        # --- inside epoch loop ---
+        if warmup_epochs > 0:
+            t = min(1.0, (epoch - 1) / max(1, warmup_epochs - 1))  # epoch=1 -> 0.0, epoch=warmup_epochs -> 1.0
         else:
-            ms_ssim_weight = ms_ssim_weight_final
-            l1_weight = l1_weight_final
+            t = 1.0
+
+        ms_ssim_weight = ms_ssim_weight_start + t * (ms_ssim_weight_final - ms_ssim_weight_start)
+        l1_weight      = l1_weight_start      + t * (l1_weight_final      - l1_weight_start)
 
         train_loss = train_one_epoch(stage1, train_loader, optim1, device, scaler, ema=ema, ms_ssim_weight=ms_ssim_weight, l1_weight=l1_weight)
 

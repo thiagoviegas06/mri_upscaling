@@ -127,7 +127,13 @@ class MRIPatchDataset(Dataset):
         patch_size=96,
         patches_per_volume=64,
         cache_volumes=True,
-        stack_size=7
+        stack_size=7,
+        sample_strategy="filtered",
+        fg_thresh=0.10,
+        energy_thresh=0.01,
+        keep_bg_prob=0.30,
+        max_tries=20,
+        debug=False
     ):
         if stack_size % 2 == 0:
             raise ValueError("stack_size must be odd")
@@ -140,6 +146,13 @@ class MRIPatchDataset(Dataset):
 
         self._cache = {}  # vol_idx -> (lf, hf)
         self._length = len(pairs) * patches_per_volume
+
+        self.sample_strategy = sample_strategy
+        self.fg_thresh = fg_thresh
+        self.energy_thresh = energy_thresh
+        self.keep_bg_prob = keep_bg_prob
+        self.max_tries = max_tries
+        self.debug = debug
 
     def __len__(self):
         return self._length
@@ -162,40 +175,75 @@ class MRIPatchDataset(Dataset):
         vol_idx = idx // self.patches_per_volume
         lf, hf = self._get_volume_pair(vol_idx)
 
-        # ---- smart sampling params ----
-        max_tries = 20          # how many random attempts before we give up
-        fg_thresh = 0.10        # require at least 10% foreground in HF patch
-        energy_thresh = 0.01    # require some structure (tune this!)
-        keep_bg_prob = 0.15     # still keep some background patches
+        debug_dict = None  # will fill if self.debug
 
-        chosen = None
-        last_candidate = None
+        if self.sample_strategy == "filtered":
+            chosen = None
+            last = None
+            tries = 0
+            accepted_reason = None
 
-        for _ in range(max_tries):
+            for _ in range(self.max_tries):
+                tries += 1
+                z = random_z_index(lf.shape, self.stack_size)
+                x, y = random_xy_coords(lf.shape, self.patch_size)
+
+                lf_stack = extract_slice_stack(lf, x, y, z, self.patch_size, self.stack_size)
+                hf_slice = extract_xy_patch(hf, x, y, z, self.patch_size)
+
+                en = energy_np(hf_slice)
+                fg = fg_frac_np(hf_slice, thresh=0.05)  # intensity threshold
+
+                last = (lf_stack, hf_slice, z, x, y, fg, en)
+
+                is_informative = (fg >= self.fg_thresh and en >= self.energy_thresh)
+
+                if is_informative:
+                    chosen = (lf_stack, hf_slice, z, x, y, fg, en)
+                    accepted_reason = "informative"
+                    break
+
+                # keep some non-informative samples
+                if random.random() < self.keep_bg_prob:
+                    chosen = (lf_stack, hf_slice, z, x, y, fg, en)
+                    accepted_reason = "keep_bg"
+                    break
+
+            if chosen is None:
+                lf_stack, hf_slice, z, x, y, fg, en = last
+                accepted_reason = "fallback"
+            else:
+                lf_stack, hf_slice, z, x, y, fg, en = chosen
+
+        else:
             z = random_z_index(lf.shape, self.stack_size)
             x, y = random_xy_coords(lf.shape, self.patch_size)
 
             lf_stack = extract_slice_stack(lf, x, y, z, self.patch_size, self.stack_size)
             hf_slice = extract_xy_patch(hf, x, y, z, self.patch_size)
 
-            last_candidate = (lf_stack, hf_slice)
-
-            # compute “informativeness” on HF target patch
             fg = fg_frac_np(hf_slice, thresh=0.05)
             en = energy_np(hf_slice)
+            tries = 1
+            accepted_reason = "random"
 
-            # accept if informative OR keep-bg coin flip
-            if (fg >= fg_thresh and en >= energy_thresh) or (random.random() < keep_bg_prob):
-                chosen = (lf_stack, hf_slice)
-                break
+        lf_t = torch.from_numpy(lf_stack).float()         # (C, H, W)
+        hf_t = torch.from_numpy(hf_slice)[None].float()   # (1, H, W)
 
-        if chosen is None:
-            # fallback: return the last sampled candidate so __getitem__ always succeeds
-            lf_stack, hf_slice = last_candidate
-        else:
-            lf_stack, hf_slice = chosen
-
-        lf_t = torch.from_numpy(lf_stack)        # (C, H, W)
-        hf_t = torch.from_numpy(hf_slice)[None]  # (1, H, W)
+        if getattr(self, "debug", False):
+            debug_dict = {
+                "reason": accepted_reason,
+                "tries": int(tries),
+                "fg": float(fg),
+                "en": float(en),
+                "vol_idx": int(vol_idx),
+                "z": int(z),
+                "x": int(x),
+                "y": int(y),
+            }
+            return lf_t, hf_t, debug_dict
 
         return lf_t, hf_t
+
+        # Option B (recommended for debugging + slice finetune):
+        # return lf_t, hf_t, vol_idx, z, x, y
