@@ -151,31 +151,24 @@ def _normalize_2d(x):
     return np.zeros_like(x)
 
 def ssim_2d_metric(img1, img2):
-    img1_norm = _normalize_2d(img1)
-    img2_norm = _normalize_2d(img2)
-
-    c1 = 0.01 ** 2
-    c2 = 0.03 ** 2
-
-    mu1 = img1_norm.mean()
-    mu2 = img2_norm.mean()
-
-    sigma1_sq = ((img1_norm - mu1) ** 2).mean()
-    sigma2_sq = ((img2_norm - mu2) ** 2).mean()
-    sigma12 = ((img1_norm - mu1) * (img2_norm - mu2)).mean()
-
-    numerator = (2 * mu1 * mu2 + c1) * (2 * sigma12 + c2)
-    denominator = (mu1 ** 2 + mu2 ** 2 + c1) * (sigma1_sq + sigma2_sq + c2)
-
-    return float(numerator / denominator)
+    t1 = torch.from_numpy(np.clip(img1, 0.0, 1.0)).float()[None, None]
+    t2 = torch.from_numpy(np.clip(img2, 0.0, 1.0)).float()[None, None]
+    with torch.no_grad():
+        return float(ssim_2d_torch(t1, t2).item())
 
 def ms_ssim_2d_metric(img1, img2):
-    img1_norm = _normalize_2d(img1)
-    img2_norm = _normalize_2d(img2)
-    t1 = torch.from_numpy(img1_norm).to(torch.float32)[None, None, ...]
-    t2 = torch.from_numpy(img2_norm).to(torch.float32)[None, None, ...]
+    t1 = torch.from_numpy(np.clip(img1, 0.0, 1.0)).float()[None, None]
+    t2 = torch.from_numpy(np.clip(img2, 0.0, 1.0)).float()[None, None]
     with torch.no_grad():
         return float(ms_ssim_2d_torch(t1, t2).item())
+
+def psnr_2d_metric(img1, img2, eps=1e-12):
+    a = np.clip(img1, 0.0, 1.0)
+    b = np.clip(img2, 0.0, 1.0)
+    mse = float(np.mean((a - b) ** 2))
+    if mse < eps:
+        return float("inf")
+    return float(20 * np.log10(1.0 / np.sqrt(mse)))
 
 def _gaussian_window_2d(patch_size, sigma=None):
     if sigma is None:
@@ -193,14 +186,6 @@ def _start_indices(dim, patch_size, stride):
         idxs.append(dim - patch_size)
     return idxs
 
-def psnr_2d_metric(img1, img2):
-    """Compute PSNR between two 2D images."""
-    img1_norm = _normalize_2d(img1)
-    img2_norm = _normalize_2d(img2)
-    mse = np.mean((img1_norm - img2_norm) ** 2)
-    if mse == 0:
-        return float('inf')
-    return float(20 * np.log10(1.0 / np.sqrt(mse)))
 
 def _slice_stack(volume, z_center, stack_size):
     half = stack_size // 2
@@ -212,7 +197,7 @@ def _slice_stack(volume, z_center, stack_size):
     return np.stack(slices, axis=0)
 
 @torch.no_grad()
-def predict_volume(stage1, volume, refiner=None, patch_size=96, stride=48, device="cpu", stack_size=5):
+def predict_volume(stage1, volume, refiner=None, patch_size=96, stride=48, device="cpu", stack_size=7):
     x_starts = _start_indices(volume.shape[0], patch_size, stride)
     y_starts = _start_indices(volume.shape[1], patch_size, stride)
     depth = volume.shape[2]
@@ -320,7 +305,8 @@ def validate(model, loader, device, ms_weight=0.9):
 _validation_volume_cache = {}
 
 @torch.no_grad()
-def validate_metric(stage1, pairs, device, ema=None, refiner=None, patch_size=96, stride=48, max_volumes=None, slice_stride=1, stack_size=5):
+def validate_metric(stage1, pairs, device, ema=None, refiner=None, patch_size=96, 
+                    stride=48, max_volumes=None, slice_stride=1, stack_size=7):
     stage1.eval()
     if refiner is not None:
         refiner.eval()
