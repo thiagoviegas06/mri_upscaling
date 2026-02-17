@@ -24,6 +24,18 @@ def fg_frac(hf_patch: torch.Tensor, thresh: float = 0.05) -> float:
     return float((x > thresh).mean())
 
 
+def patch_energy(hf_patch: torch.Tensor) -> float:
+    """
+    Simple edge/texture energy proxy.
+    hf_patch: [1,H,W] (float), ideally in [0,1]
+    Higher => more structure/edges; lower => flatter/background-ish.
+    """
+    x = hf_patch.squeeze(0).detach().cpu().numpy().astype(np.float32)
+    gx = np.abs(np.diff(x, axis=0)).mean()
+    gy = np.abs(np.diff(x, axis=1)).mean()
+    return float(gx + gy)
+
+
 if __name__ == "__main__":
     patch_size = 96
     stack_size = 7
@@ -61,6 +73,7 @@ if __name__ == "__main__":
     print(f"overlap train/val pairs: {len(train_set & val_set)}")
 
     # sample a few random patches from each split
+    # sample a few random patches from each split
     for name, ds in [("train", train_ds), ("val", val_ds)]:
         print("\n====================")
         print(f"{name} samples:")
@@ -71,18 +84,30 @@ if __name__ == "__main__":
                 f"lf[min,max]=({lf_t.min():.4f},{lf_t.max():.4f})  "
                 f"hf[min,max]=({hf_t.min():.4f},{hf_t.max():.4f})  "
                 f"hf mean={hf_t.mean():.4f} std={hf_t.std():.4f}  "
-                f"fg@0.05={fg_frac(hf_t):.3f}"
+                f"fg@0.05={fg_frac(hf_t):.3f}  "
+                f"energy={patch_energy(hf_t):.6f}"
             )
 
-    # optional: foreground fraction distribution over many samples (train)
+    # distributions over many samples (train)
+    energies = []
     fgs = []
-    for _ in range(500):
+    for _ in range(1000):
         _, hf_t = train_ds[random.randint(0, len(train_ds) - 1)]
         fgs.append(fg_frac(hf_t))
+        energies.append(patch_energy(hf_t))
+
     fgs = np.asarray(fgs, dtype=np.float32)
+    energies = np.asarray(energies, dtype=np.float32)
 
     print(
-        "\nFG frac stats over 500 train patches: "
+        "\nEnergy stats over 1000 train patches: "
+        f"mean={energies.mean():.6f}  "
+        f"p10={np.percentile(energies,10):.6f}  "
+        f"p50={np.percentile(energies,50):.6f}  "
+        f"p90={np.percentile(energies,90):.6f}"
+    )
+    print(
+        "FG frac stats over 1000 train patches: "
         f"mean={fgs.mean():.3f}  "
         f"p10={np.percentile(fgs,10):.3f}  "
         f"p50={np.percentile(fgs,50):.3f}  "
