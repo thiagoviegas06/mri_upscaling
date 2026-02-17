@@ -37,6 +37,15 @@ def load_pair_resample_normalize(lf_path, hf_path, interp_order=1):
 
     lf, hf = preprocess_pair_from_lf_stats(lf, hf)
 
+    min_lf = lf.min()
+    max_lf = lf.max()
+    min_hf = hf.min()
+    max_hf = hf.max()
+
+    print(f"LF min: {min_lf}, HF min: {min_hf}, LF max: {max_lf}, HF max: {max_hf}")
+    if min_lf != min_hf or max_lf != max_hf:   
+        raise ValueError("LF and HF min/max values do not match")
+
     return lf, hf  # numpy arrays, same shape (179,221,200)
 
 def random_xy_coords(vol_shape, patch_size):
@@ -91,34 +100,30 @@ def _augment_pair_2d(lf_stack, hf_slice):
 # ---------- dataset ----------
 class MRIPatchDataset(Dataset):
     """
-    Returns 2.5D LF/HF patch pairs.
-    Each __getitem__ picks an XY patch and a Z-center slice, then stacks k
-    adjacent LF slices (channels) and predicts the center HF slice.
+    Minimal 2.5D LF/HF patch dataset.
+    - Uses pair-consistent normalization
+    - No tissue sampling
+    - No augmentation
+    - Random patch sampling only
     """
-    def __init__(self, pairs, patch_size=96, patches_per_volume=64, cache_volumes=True,
-                 tissue_sampling=True, foreground_percentile=20, min_foreground_ratio=0.05, max_tries=20,
-                 augment=False, stack_size=5):
-        """
-        pairs: list of (lf_path, hf_path)
-        patches_per_volume: how many patches to draw per volume per epoch
-        cache_volumes: cache preprocessed volumes in RAM to speed up epochs
-        stack_size: number of adjacent slices for 2.5D input (must be odd)
-        """
+    def __init__(
+        self,
+        pairs,
+        patch_size=96,
+        patches_per_volume=64,
+        cache_volumes=True,
+        stack_size=7
+    ):
         if stack_size % 2 == 0:
             raise ValueError("stack_size must be odd")
+
         self.pairs = pairs
         self.patch_size = patch_size
         self.patches_per_volume = patches_per_volume
         self.cache_volumes = cache_volumes
-        self.tissue_sampling = tissue_sampling
-        self.foreground_percentile = foreground_percentile
-        self.min_foreground_ratio = min_foreground_ratio
-        self.max_tries = max_tries
-        self.augment = augment
         self.stack_size = stack_size
-        self._cache = {}  # idx -> (lf_np, hf_np, mask)
 
-        # Make dataset length = number of "patch samples" per epoch
+        self._cache = {}  # vol_idx -> (lf, hf)
         self._length = len(pairs) * patches_per_volume
 
     def __len__(self):
@@ -129,39 +134,45 @@ class MRIPatchDataset(Dataset):
             return self._cache[vol_idx]
 
         lf_path, hf_path = self.pairs[vol_idx]
-        lf, hf = load_pair_resample_normalize(lf_path, hf_path, interp_order=1)
-        mask = None
-        if self.tissue_sampling:
-            mask = compute_foreground_mask(lf, percentile=self.foreground_percentile)
+        lf, hf = load_pair_resample_normalize(
+            lf_path, hf_path, interp_order=1
+        )  # <-- uses pair-consistent normalization
 
         if self.cache_volumes:
-            self._cache[vol_idx] = (lf, hf, mask)
-        return lf, hf, mask
+            self._cache[vol_idx] = (lf, hf)
+
+        return lf, hf
 
     def __getitem__(self, idx):
         vol_idx = idx // self.patches_per_volume
-        lf, hf, mask = self._get_volume_pair(vol_idx)
+        lf, hf = self._get_volume_pair(vol_idx)
 
+        # random slice
         z = random_z_index(lf.shape, self.stack_size)
 
-        x = y = 0
-        for _ in range(self.max_tries):
-            x, y = random_xy_coords(lf.shape, self.patch_size)
-            if mask is None:
-                break
-            patch_mask = mask[x:x + self.patch_size, y:y + self.patch_size, z]
-            if patch_mask.mean() >= self.min_foreground_ratio:
-                break
+        # random XY location
+        x, y = random_xy_coords(lf.shape, self.patch_size)
 
-        lf_stack = extract_slice_stack(lf, x, y, z, self.patch_size, self.stack_size)
-        hf_slice = extract_xy_patch(hf, x, y, z, self.patch_size)
+        # extract 2.5D stack
+        lf_stack = extract_slice_stack(
+            lf, x, y, z,
+            self.patch_size,
+            self.stack_size
+        )
 
-        if self.augment:
-            lf_stack, hf_slice = _augment_pair_2d(lf_stack, hf_slice)
-            lf_stack = lf_stack.copy()
-            hf_slice = hf_slice.copy()
+        # extract center HF slice
+        hf_slice = extract_xy_patch(
+            hf, x, y, z,
+            self.patch_size
+        )
 
-        # to torch: LF (C, H, W), HF (1, H, W)
-        lf_t = torch.from_numpy(lf_stack)
-        hf_t = torch.from_numpy(hf_slice)[None, ...]
+        # to torch
+        lf_t = torch.from_numpy(lf_stack)          # (C, H, W)
+        hf_t = torch.from_numpy(hf_slice)[None]    # (1, H, W)
+
+        #fraction of foregound pixels
+        lf_fg_frac = compute_foreground_mask(lf_stack).mean()
+        hf_fg_frac = compute_foreground_mask(hf_slice).mean()
+        print(f"LF foreground fraction: {lf_fg_frac}, HF foreground fraction: {hf_fg_frac}")
+
         return lf_t, hf_t
