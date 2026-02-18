@@ -83,8 +83,15 @@ def preprocess_pair_from_lf_stats(lf, hf, p_low=1, p_high=99, eps=1e-6):
     hf_n = (hf_c - lo) / (hi - lo + eps)
     return lf_n.astype(np.float32), hf_n.astype(np.float32)
 
-def load_pair_resample_normalize(lf_path, hf_path, interp_order=1, *,
-                                 p_low=1, p_high=99, eps=1e-6, clip=True):
+def load_pair_resample_normalize(
+    lf_path, hf_path,
+    interp_order=1,
+    *,
+    normalize=True,
+    p_low=1, p_high=99,
+    eps=1e-6,
+    clip=True
+):
     lf_img = nib.load(lf_path)
     hf_img = nib.load(hf_path)
 
@@ -93,14 +100,22 @@ def load_pair_resample_normalize(lf_path, hf_path, interp_order=1, *,
     lf = lf_resampled_img.get_fdata().astype(np.float32)
     hf = hf_img.get_fdata().astype(np.float32)
 
-    lf, hf, (lo, hi) = normalize_from_lf(
-        lf, hf, p_low=p_low, p_high=p_high, eps=eps, clip=clip
-    )
+    if normalize:
+        # TRAINING PAIRS: normalize both using LF stats
+        lf, hf, (lo, hi) = normalize_from_lf(
+            lf, hf, p_low=p_low, p_high=p_high, eps=eps, clip=clip
+        )
+    else:
+        # KAGGLE-STYLE VALIDATION / INFERENCE INPUT:
+        # normalize LF only (model expects this), leave HF raw (Kaggle metric normalizes per-slice anyway)
+        lf, (lo, hi) = normalize_lf_for_inference(
+            lf, p_low=p_low, p_high=p_high, eps=eps, clip=clip
+        )
 
     if lf.shape != hf.shape:
         raise ValueError(f"LF/HF shape mismatch: {lf.shape} vs {hf.shape}")
     if not (np.isfinite(lf).all() and np.isfinite(hf).all()):
-        raise ValueError("Non-finite values found after preprocessing")
+        raise ValueError("Non-finite values found after loading/preprocessing")
 
     return lf, hf, (lo, hi)
 

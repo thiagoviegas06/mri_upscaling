@@ -72,7 +72,7 @@ def main():
         )
 
         pred = np.clip(pred, 0.0, 1.0)
-        pred = denormalize_to_lf_scale(pred, lo=1, hi=99)
+       
         predictions[sample_id] = pred
 
     df = create_submission_df(predictions)

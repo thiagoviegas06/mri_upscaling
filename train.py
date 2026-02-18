@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from torch.amp import autocast
 
 from preprocessing import load_pair_resample_normalize
+from metric import _normalize_01, _gaussian_kernel_2d, _ssim_components, compute_ms_ssim
 
 
 # ---------------------------
@@ -294,11 +295,15 @@ def predict_volume_batched_xy(
     return pred_vol
 
 
+@torch.no_grad()
 def validate_metric(stage1, pairs, device, ema=None, refiner=None, patch_size=96,
                     stride=48, max_volumes=None, slice_stride=1, stack_size=7):
     """
-    Kept (trimmed) since you likely use it to approximate competition scoring.
-    Uses only MS-SSIM in [0,1] space like your inference.
+    Kaggle-matching validation:
+    - full-volume stitched prediction
+    - per-slice min-max normalization to [0,1] (exactly like Kaggle _normalize_01)
+    - Kaggle MS-SSIM using fftconvolve(mode='valid') + even-dim trimming downsampling
+    Returns: (mean_ms_ssim, total_slices)
     """
     stage1.eval()
     if refiner is not None:
@@ -315,7 +320,7 @@ def validate_metric(stage1, pairs, device, ema=None, refiner=None, patch_size=96
         if cache_key in _validation_volume_cache:
             lf, hf = _validation_volume_cache[cache_key]
         else:
-            lf, hf, _ = load_pair_resample_normalize(lf_path, hf_path, interp_order=1)
+            lf, hf, _ = load_pair_resample_normalize(lf_path, hf_path, interp_order=1, normalize=False)
             _validation_volume_cache[cache_key] = (lf, hf)
 
         ema_backup = None
@@ -324,23 +329,26 @@ def validate_metric(stage1, pairs, device, ema=None, refiner=None, patch_size=96
 
         pred = predict_volume_batched_xy(
             stage1, lf, refiner=refiner,
-            patch_size=patch_size, stride=stride, device=device, stack_size=stack_size,
+            patch_size=patch_size, stride=stride,
+            device=device, stack_size=stack_size,
             use_amp=(device == "cuda"),
         )
 
         if ema is not None:
             ema.restore(stage1, ema_backup)
 
-        pred = np.clip(pred, 0.0, 1.0)
+        # IMPORTANT: Kaggle does NOT clip; it min-max normalizes each slice.
+        # Clipping can still be okay, but to match Kaggle most closely, skip it here.
+        # pred = np.clip(pred, 0.0, 1.0)
 
-        # MS-SSIM per slice
         for z in range(0, hf.shape[2], slice_stride):
-            gt = np.clip(hf[:, :, z], 0.0, 1.0)
-            pr = pred[:, :, z]
+            gt_slice = hf[:, :, z]
+            pr_slice = pred[:, :, z]
 
-            t1 = torch.from_numpy(pr).float()[None, None].to(device)
-            t2 = torch.from_numpy(gt).float()[None, None].to(device)
-            total_ms_ssim += float(ms_ssim_2d_torch(t1, t2).item())
+            gt_norm = _normalize_01(gt_slice)
+            pr_norm = _normalize_01(pr_slice)
+
+            total_ms_ssim += compute_ms_ssim(gt_norm, pr_norm)
             total_slices += 1
 
     if total_slices == 0:
