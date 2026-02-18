@@ -350,3 +350,68 @@ def validate_metric(stage1, pairs, device, ema=None, refiner=None, patch_size=96
     mean_psnr = total_psnr / total_slices
     score = mean_ms_ssim  # Competition metric: MS-SSIM only
     return score, mean_ssim, mean_ms_ssim, mean_psnr, total_slices
+
+@torch.inference_mode()
+def predict_volume_batched_xy(
+    stage1, volume, refiner=None,
+    patch_size=96, stride=48, device="cpu", stack_size=7,
+    use_amp=True,
+):
+    stage1.eval()
+    if refiner is not None:
+        refiner.eval()
+
+    x_starts = _start_indices(volume.shape[0], patch_size, stride)
+    y_starts = _start_indices(volume.shape[1], patch_size, stride)
+    depth = volume.shape[2]
+
+    pred_vol = np.zeros_like(volume, dtype=np.float32)
+    gaussian_window = _gaussian_window_2d(patch_size).astype(np.float32)
+
+    n_patches = len(x_starts) * len(y_starts)
+
+    for z in range(depth):
+        accum = np.zeros((volume.shape[0], volume.shape[1]), dtype=np.float32)
+        weight = np.zeros((volume.shape[0], volume.shape[1]), dtype=np.float32)
+
+        stack_full = _slice_stack(volume, z, stack_size)  # (C, X, Y)
+
+        # ---- build batch of patches for this z ----
+        patches = []
+        coords = []
+        for x in x_starts:
+            for y in y_starts:
+                patch = stack_full[:, x:x + patch_size, y:y + patch_size]  # (C,H,W)
+                patches.append(patch)
+                coords.append((x, y))
+
+        patches_np = np.stack(patches, axis=0).astype(np.float32)  # (B,C,H,W)
+        patch_t = torch.from_numpy(patches_np).to(device, non_blocking=True)
+
+        # ---- one forward for all patches ----
+        if use_amp and (device != "cpu"):
+            autocast_ctx = torch.autocast(device_type="cuda", dtype=torch.float16)
+        else:
+            autocast_ctx = torch.autocast(device_type="cpu", enabled=False)
+
+        with autocast_ctx:
+            if refiner is None:
+                pred_t = stage1(patch_t)  # (B,1,H,W)
+            else:
+                y1 = stage1(patch_t)
+                inp = torch.cat([patch_t, y1], dim=1)
+                delta = refiner(inp)
+                limit = 0.2
+                delta = limit * torch.tanh(delta / limit)
+                pred_t = y1 + delta
+
+        preds = pred_t.squeeze(1).detach().float().cpu().numpy()  # (B,H,W)
+
+        # ---- scatter back into accum/weight ----
+        for i, (x, y) in enumerate(coords):
+            accum[x:x + patch_size, y:y + patch_size] += preds[i] * gaussian_window
+            weight[x:x + patch_size, y:y + patch_size] += gaussian_window
+
+        pred_vol[:, :, z] = accum / np.maximum(weight, 1e-8)
+
+    return pred_vol

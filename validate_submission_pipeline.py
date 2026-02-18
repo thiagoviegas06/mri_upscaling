@@ -8,7 +8,7 @@ from nibabel.processing import resample_from_to
 
 from model import UNet2_5D
 from preprocessing import preprocess_volume
-from train import predict_volume
+from train import predict_volume_batched_xy
 from mri_resolution.extract_slices import volume_to_submission_rows
 from mri_resolution import metric as eval_metric
 
@@ -47,20 +47,30 @@ def build_solution_df(pairs):
     return df
 
 
-def build_submission_df(model, pairs, device, patch_size=96, stride=48, stack_size=7):
+def build_submission_df_from_cache(model, cached_inputs, device, patch_size=96, stride=48, stack_size=7):
     rows = []
-    for lf_path, hf_path in pairs:
-        sample_id = Path(lf_path).name.replace("_lowfield.nii", "")
-        hf_img = nib.load(str(hf_path))
-        lf_img = nib.load(str(lf_path))
-        lf_resampled = resample_from_to(lf_img, hf_img, order=1)
-        volume = lf_resampled.get_fdata().astype(np.float32)
-        volume = preprocess_volume(volume)
-
-        pred = predict_volume(model, volume, patch_size=patch_size, stride=stride, device=device, stack_size=stack_size)
+    for sample_id, volume in cached_inputs.items():
+        pred = predict_volume_batched_xy(model, volume, patch_size=patch_size, stride=stride, device=device, stack_size=stack_size)
         pred = np.clip(pred, 0.0, 1.0)
         rows.extend(volume_to_submission_rows(pred, sample_id))
     return pd.DataFrame(rows)
+
+def cache_inputs(pairs):
+    cached = {}
+    for lf_path, hf_path in pairs:
+        sample_id = Path(lf_path).name.replace("_lowfield.nii", "")
+        if sample_id in cached:
+            continue
+
+        hf_img = nib.load(str(hf_path))
+        lf_img = nib.load(str(lf_path))
+        lf_resampled = resample_from_to(lf_img, hf_img, order=1)
+
+        volume = lf_resampled.get_fdata().astype(np.float32)
+        volume = preprocess_volume(volume)
+
+        cached[sample_id] = volume
+    return cached
 
 
 def main():
@@ -86,13 +96,17 @@ def main():
         raise RuntimeError("No LF/HF pairs found for validation.")
     
     print(f"Evaluating on all {len(pairs)} pairs\n")
-
+    
+    cached_inputs = cache_inputs(pairs)
     solution = build_solution_df(pairs)
     
     print("Evaluating individual models...\n")
     scores = []
     
     for ckpt_path in checkpoint_paths:
+        del model
+        if device == "cuda":
+            torch.cuda.empty_cache()
         if not Path(ckpt_path).exists():
             print(f"  Skipping {ckpt_path} (not found)")
             continue
@@ -101,7 +115,7 @@ def main():
         model = load_model(ckpt_path, device=device, base=56, stack_size=stack_size)
         
         print(f"  Evaluating {ckpt_path}...")
-        submission = build_submission_df(model, pairs, device=device, patch_size=96, stride=48, stack_size=stack_size)
+        submission = build_submission_df_from_cache(model, cached_inputs, device=device, patch_size=96, stride=48, stack_size=stack_size)
         
         score = eval_metric.score(solution, submission, "row_id")
         scores.append((ckpt_path, score))
