@@ -315,7 +315,7 @@ def validate_metric(stage1, pairs, device, ema=None, refiner=None, patch_size=96
         if cache_key in _validation_volume_cache:
             lf, hf = _validation_volume_cache[cache_key]
         else:
-            lf, hf = load_pair_resample_normalize(lf_path, hf_path, interp_order=1)
+            lf, hf, _ = load_pair_resample_normalize(lf_path, hf_path, interp_order=1)
             _validation_volume_cache[cache_key] = (lf, hf)
 
         ema_backup = None

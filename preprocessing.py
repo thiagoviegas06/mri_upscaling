@@ -247,9 +247,9 @@ class MRIPatchDataset(Dataset):
             return self._cache[vol_idx]
 
         lf_path, hf_path = self.pairs[vol_idx]
-        lf, hf = load_pair_resample_normalize(
+        lf, hf, _ = load_pair_resample_normalize(
             lf_path, hf_path, interp_order=1
-        )  # <-- uses pair-consistent normalization
+        ) # <-- uses pair-consistent normalization
 
         if self.cache_volumes:
             self._cache[vol_idx] = (lf, hf)
