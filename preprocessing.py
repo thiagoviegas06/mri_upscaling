@@ -63,6 +63,39 @@ def load_pair_resample_normalize(lf_path, hf_path, interp_order=1):
 
     return lf, hf  # numpy arrays, same shape (179,221,200)
 
+def normalize_lf_like_training(lf, p_low=1, p_high=99, eps=1e-6):
+    """
+    Normalize LF volume exactly like training does.
+    Uses LF percentiles only.
+    """
+    lo, hi = np.percentile(lf, [p_low, p_high])
+
+    if hi <= lo + eps:
+        lo, hi = float(np.min(lf)), float(np.max(lf))
+        if hi <= lo + eps:
+            return np.zeros_like(lf, np.float32)
+
+    lf_c = np.clip(lf, lo, hi)
+    lf_n = (lf_c - lo) / (hi - lo + eps)
+
+    return lf_n.astype(np.float32)
+
+def preprocess_pair_from_lf_stats(lf, hf, p_low=1, p_high=99, eps=1e-6):
+    lo, hi = np.percentile(lf, [p_low, p_high])
+
+    if hi <= lo + eps:
+        lo, hi = float(np.min(lf)), float(np.max(lf))
+        if hi <= lo + eps:
+            return np.zeros_like(lf, np.float32), np.zeros_like(hf, np.float32)
+
+    lf_c = np.clip(lf, lo, hi)
+    hf_c = np.clip(hf, lo, hi)
+
+    lf_n = (lf_c - lo) / (hi - lo + eps)
+    hf_n = (hf_c - lo) / (hi - lo + eps)
+
+    return lf_n.astype(np.float32), hf_n.astype(np.float32)
+
 def random_xy_coords(vol_shape, patch_size):
     # vol_shape: (X, Y, Z)
     x_max = vol_shape[0] - patch_size

@@ -356,6 +356,7 @@ def predict_volume_batched_xy(
     stage1, volume, refiner=None,
     patch_size=96, stride=48, device="cpu", stack_size=7,
     use_amp=True,
+    microbatch=32,          # <--- important
 ):
     stage1.eval()
     if refiner is not None:
@@ -368,7 +369,10 @@ def predict_volume_batched_xy(
     pred_vol = np.zeros_like(volume, dtype=np.float32)
     gaussian_window = _gaussian_window_2d(patch_size).astype(np.float32)
 
-    n_patches = len(x_starts) * len(y_starts)
+    if use_amp and (device != "cpu"):
+        autocast_ctx = torch.autocast(device_type="cuda", dtype=torch.float16)
+    else:
+        autocast_ctx = contextlib.nullcontext()
 
     for z in range(depth):
         accum = np.zeros((volume.shape[0], volume.shape[1]), dtype=np.float32)
@@ -376,38 +380,34 @@ def predict_volume_batched_xy(
 
         stack_full = _slice_stack(volume, z, stack_size)  # (C, X, Y)
 
-        # ---- build batch of patches for this z ----
         patches = []
         coords = []
         for x in x_starts:
             for y in y_starts:
-                patch = stack_full[:, x:x + patch_size, y:y + patch_size]  # (C,H,W)
-                patches.append(patch)
+                patches.append(stack_full[:, x:x + patch_size, y:y + patch_size])
                 coords.append((x, y))
 
         patches_np = np.stack(patches, axis=0).astype(np.float32)  # (B,C,H,W)
         patch_t = torch.from_numpy(patches_np).to(device, non_blocking=True)
 
-        # ---- one forward for all patches ----
-        if use_amp and (device != "cpu"):
-            autocast_ctx = torch.autocast(device_type="cuda", dtype=torch.float16)
-        else:
-            autocast_ctx = torch.autocast(device_type="cpu", enabled=False)
-
+        preds_all = []
         with autocast_ctx:
-            if refiner is None:
-                pred_t = stage1(patch_t)  # (B,1,H,W)
-            else:
-                y1 = stage1(patch_t)
-                inp = torch.cat([patch_t, y1], dim=1)
-                delta = refiner(inp)
-                limit = 0.2
-                delta = limit * torch.tanh(delta / limit)
-                pred_t = y1 + delta
+            for s in range(0, patch_t.shape[0], microbatch):
+                mb = patch_t[s:s+microbatch]
+                if refiner is None:
+                    out = stage1(mb)  # (mb,1,H,W)
+                else:
+                    y1 = stage1(mb)
+                    inp = torch.cat([mb, y1], dim=1)
+                    delta = refiner(inp)
+                    limit = 0.2
+                    delta = limit * torch.tanh(delta / limit)
+                    out = y1 + delta
+                preds_all.append(out)
 
-        preds = pred_t.squeeze(1).detach().float().cpu().numpy()  # (B,H,W)
+        pred_t = torch.cat(preds_all, dim=0)  # (B,1,H,W)
+        preds = pred_t.squeeze(1).float().cpu().numpy()  # (B,H,W)
 
-        # ---- scatter back into accum/weight ----
         for i, (x, y) in enumerate(coords):
             accum[x:x + patch_size, y:y + patch_size] += preds[i] * gaussian_window
             weight[x:x + patch_size, y:y + patch_size] += gaussian_window
