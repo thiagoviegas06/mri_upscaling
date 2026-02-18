@@ -1,16 +1,19 @@
+# train.py (patched + trimmed)
 import contextlib
 import numpy as np
 import torch
-from torch.amp import autocast
 import torch.nn.functional as F
+from torch.amp import autocast
 
 from preprocessing import load_pair_resample_normalize
-from model import UNet2_5D
 
 
+# ---------------------------
+# EMA
+# ---------------------------
 class EMA:
     def __init__(self, model, decay=0.999):
-        self.decay = decay
+        self.decay = float(decay)
         self.shadow = {k: v.detach().clone() for k, v in model.state_dict().items()}
 
     def update(self, model):
@@ -19,7 +22,6 @@ class EMA:
                 self.shadow[name].mul_(self.decay).add_(param.detach(), alpha=1.0 - self.decay)
             else:
                 self.shadow[name] = param.detach().clone()
-
 
     def apply_to(self, model):
         backup = {k: v.detach().clone() for k, v in model.state_dict().items()}
@@ -35,6 +37,10 @@ class EMA:
     def load_state_dict(self, state):
         self.shadow = {k: v.clone() for k, v in state.items()}
 
+
+# ---------------------------
+# MS-SSIM (2D) for training/validation loss
+# ---------------------------
 def _gaussian_kernel_2d(window_size, sigma, device, dtype):
     coords = torch.arange(window_size, device=device, dtype=dtype) - (window_size - 1) / 2
     g = torch.exp(-(coords ** 2) / (2 * sigma ** 2))
@@ -43,7 +49,6 @@ def _gaussian_kernel_2d(window_size, sigma, device, dtype):
     return kernel / kernel.sum()
 
 def _ssim_components_2d(x, y, kernel, c1, c2):
-    # x, y: (N, C, H, W)
     channels = x.size(1)
     k = kernel[None, None, ...].repeat(channels, 1, 1, 1)
     padding = kernel.size(0) // 2
@@ -64,12 +69,11 @@ def _ssim_components_2d(x, y, kernel, c1, c2):
     return luminance, cs
 
 def ms_ssim_2d_torch(x, y, window_size=11, sigma=1.5, weights=None):
-    # x, y: (N, C, H, W)
+    """
+    x,y: (N,C,H,W) in [0,1]. We assume caller clamps; this function is differentiable.
+    """
     if weights is None:
         weights = [0.0448, 0.2856, 0.3001, 0.2363, 0.1333]
-
-    x = x.clamp(0.0, 1.0)
-    y = y.clamp(0.0, 1.0)
 
     kernel = _gaussian_kernel_2d(window_size, sigma, x.device, x.dtype)
     c1 = 0.01 ** 2
@@ -108,67 +112,96 @@ def ms_ssim_2d_torch(x, y, window_size=11, sigma=1.5, weights=None):
 
     return ms_ssim
 
-def ssim_2d_torch(x, y, window_size=11, sigma=1.5):
-    # x, y: (N, C, H, W) - single-scale SSIM
-    x = x.clamp(0.0, 1.0)
-    y = y.clamp(0.0, 1.0)
-
-    kernel = _gaussian_kernel_2d(window_size, sigma, x.device, x.dtype)
-    c1 = 0.01 ** 2
-    c2 = 0.03 ** 2
-
-    channels = x.size(1)
-    k = kernel[None, None, ...].repeat(channels, 1, 1, 1)
-    padding = window_size // 2
-
-    mu_x = F.conv2d(x, k, padding=padding, groups=channels)
-    mu_y = F.conv2d(y, k, padding=padding, groups=channels)
-
-    mu_x2 = mu_x.pow(2)
-    mu_y2 = mu_y.pow(2)
-    mu_xy = mu_x * mu_y
-
-    sigma_x2 = F.conv2d(x * x, k, padding=padding, groups=channels) - mu_x2
-    sigma_y2 = F.conv2d(y * y, k, padding=padding, groups=channels) - mu_y2
-    sigma_xy = F.conv2d(x * y, k, padding=padding, groups=channels) - mu_xy
-
-    ssim_map = ((2 * mu_xy + c1) * (2 * sigma_xy + c2)) / ((mu_x2 + mu_y2 + c1) * (sigma_x2 + sigma_y2 + c2))
-    return ssim_map.mean()
 
 def compute_loss(pred, target, ms_weight=0.6):
-    l1 = F.l1_loss(pred, target)
-    # Use MS-SSIM to match competition metric
-    ms_ssim_val = ms_ssim_2d_torch(pred, target)
+    """
+    Consistent loss: clamp BOTH pred and target to [0,1] for BOTH terms.
+    This matches your MS-SSIM behavior and your inference clipping strategy.
+    """
+    pred_c = pred.clamp(0.0, 1.0)
+    target_c = target.clamp(0.0, 1.0)
+
+    l1 = F.l1_loss(pred_c, target_c)
+    ms_ssim_val = ms_ssim_2d_torch(pred_c, target_c)
     ms_weight = float(ms_weight)
     l1_weight = 1.0 - ms_weight
     return l1_weight * l1 + ms_weight * (1.0 - ms_ssim_val)
 
-def _normalize_2d(x):
-    x_min = x.min()
-    x_max = x.max()
-    if x_max - x_min > 0:
-        return (x - x_min) / (x_max - x_min)
-    return np.zeros_like(x)
 
-def ssim_2d_metric(img1, img2):
-    t1 = torch.from_numpy(np.clip(img1, 0.0, 1.0)).float()[None, None]
-    t2 = torch.from_numpy(np.clip(img2, 0.0, 1.0)).float()[None, None]
-    with torch.no_grad():
-        return float(ssim_2d_torch(t1, t2).item())
+# ---------------------------
+# Train / Validate
+# ---------------------------
+def _to_2d_slices(pred, hf):
+    """
+    pred,hf: (N,C,H,W) or (N,C,D,H,W)
+    Returns pred_2d, hf_2d as (N*D, C, H, W) if 5D else unchanged.
+    """
+    if pred.dim() == 5:
+        N, C, D, H, W = pred.shape
+        pred_2d = pred.permute(0, 2, 1, 3, 4).reshape(N * D, C, H, W)
+        hf_2d = hf.permute(0, 2, 1, 3, 4).reshape(N * D, C, H, W)
+        return pred_2d, hf_2d
+    return pred, hf
 
-def ms_ssim_2d_metric(img1, img2):
-    t1 = torch.from_numpy(np.clip(img1, 0.0, 1.0)).float()[None, None]
-    t2 = torch.from_numpy(np.clip(img2, 0.0, 1.0)).float()[None, None]
-    with torch.no_grad():
-        return float(ms_ssim_2d_torch(t1, t2).item())
 
-def psnr_2d_metric(img1, img2, eps=1e-12):
-    a = np.clip(img1, 0.0, 1.0)
-    b = np.clip(img2, 0.0, 1.0)
-    mse = float(np.mean((a - b) ** 2))
-    if mse < eps:
-        return float("inf")
-    return float(20 * np.log10(1.0 / np.sqrt(mse)))
+def train_one_epoch(model, loader, optim, device, scaler=None, ema=None,
+                    ms_weight=0.9):
+    model.train()
+    running = 0.0
+
+    for lf, hf in loader:
+        lf = lf.to(device, non_blocking=True)
+        hf = hf.to(device, non_blocking=True)
+
+        optim.zero_grad(set_to_none=True)
+
+        amp_ctx = autocast(device_type="cuda") if device == "cuda" else contextlib.nullcontext()
+        with amp_ctx:
+            pred = model(lf)
+            pred_2d, hf_2d = _to_2d_slices(pred, hf)
+            loss = compute_loss(pred_2d, hf_2d, ms_weight=ms_weight)
+
+        if scaler is not None and device == "cuda":
+            scaler.scale(loss).backward()
+            scaler.step(optim)
+            scaler.update()
+        else:
+            loss.backward()
+            optim.step()
+
+        if ema is not None:
+            ema.update(model)
+
+        running += float(loss.item())
+
+    return running / max(1, len(loader))
+
+
+@torch.no_grad()
+def validate(model, loader, device, ms_weight=0.9):
+    model.eval()
+    running = 0.0
+
+    for lf, hf in loader:
+        lf = lf.to(device, non_blocking=True)
+        hf = hf.to(device, non_blocking=True)
+
+        amp_ctx = autocast(device_type="cuda") if device == "cuda" else contextlib.nullcontext()
+        with amp_ctx:
+            pred = model(lf)
+            pred_2d, hf_2d = _to_2d_slices(pred, hf)
+            loss = compute_loss(pred_2d, hf_2d, ms_weight=ms_weight)
+
+        running += float(loss.item())
+
+    return running / max(1, len(loader))
+
+
+# ---------------------------
+# Optional: volume-level metric validation (kept because you had it)
+# If you truly don’t use it anymore, delete this entire section.
+# ---------------------------
+_validation_volume_cache = {}
 
 def _gaussian_window_2d(patch_size, sigma=None):
     if sigma is None:
@@ -186,7 +219,6 @@ def _start_indices(dim, patch_size, stride):
         idxs.append(dim - patch_size)
     return idxs
 
-
 def _slice_stack(volume, z_center, stack_size):
     half = stack_size // 2
     depth = volume.shape[2]
@@ -196,167 +228,12 @@ def _slice_stack(volume, z_center, stack_size):
         slices.append(volume[:, :, zc])
     return np.stack(slices, axis=0)
 
-@torch.no_grad()
-def predict_volume(stage1, volume, refiner=None, patch_size=96, stride=48, device="cpu", stack_size=7):
-    x_starts = _start_indices(volume.shape[0], patch_size, stride)
-    y_starts = _start_indices(volume.shape[1], patch_size, stride)
-    depth = volume.shape[2]
-
-    pred_vol = np.zeros_like(volume, dtype=np.float32)
-    gaussian_window = _gaussian_window_2d(patch_size)
-
-    for z in range(depth):
-        accum = np.zeros((volume.shape[0], volume.shape[1]), dtype=np.float32)
-        weight = np.zeros((volume.shape[0], volume.shape[1]), dtype=np.float32)
-        stack_full = _slice_stack(volume, z, stack_size)
-
-        for x in x_starts:
-            for y in y_starts:
-                patch = stack_full[:, x:x + patch_size, y:y + patch_size]
-                patch_t = torch.from_numpy(patch)[None, ...].to(device)
-                if refiner is None:
-                    pred_t = stage1(patch_t)
-                else:
-                    y1 = stage1(patch_t)
-                    inp = torch.cat([patch_t, y1], dim=1)
-                    delta = refiner(inp)
-
-                    limit = 0.2  # keep same as training; also try 0.1
-                    delta = limit * torch.tanh(delta / limit)
-
-                    pred_t = y1 + delta
-
-                pred = pred_t.squeeze(0).squeeze(0).cpu().numpy()
-                accum[x:x + patch_size, y:y + patch_size] += pred * gaussian_window
-                weight[x:x + patch_size, y:y + patch_size] += gaussian_window
-
-        pred_vol[:, :, z] = accum / np.maximum(weight, 1e-8)
-
-    return pred_vol
-
-def train_one_epoch(model, loader, optim, device, scaler, ema=None, ms_ssim_weight=1.0, l1_weight=1.0):
-    """
-    Train one epoch using a weighted sum of L1 and (1 - MS-SSIM) losses on 2D slices.
-    If MS-SSIM is unavailable, fallback to SSIM.
-    """
-    model.train()
-    running = 0.0
-
-    for lf, hf in loader:
-        lf = lf.to(device, non_blocking=True)
-        hf = hf.to(device, non_blocking=True)
-
-        optim.zero_grad(set_to_none=True)
-
-        amp_ctx = autocast(device_type="cuda") if device == "cuda" else contextlib.nullcontext()
-        with amp_ctx:
-            pred = model(lf)
-            # pred, hf: (N, C, H, W) or (N, C, D, H, W)
-            if pred.dim() == 5:
-                N, C, D, H, W = pred.shape
-                pred_2d = pred.permute(0, 2, 1, 3, 4).reshape(N*D, C, H, W)
-                hf_2d = hf.permute(0, 2, 1, 3, 4).reshape(N*D, C, H, W)
-            else:
-                pred_2d = pred
-                hf_2d = hf
-
-            l1 = F.l1_loss(pred_2d, hf_2d)
-            
-            # Use differentiable MS-SSIM directly on tensors (much faster and proper gradients)
-            ms_ssim_val = ms_ssim_2d_torch(pred_2d, hf_2d)
-            ms_ssim_loss = 1.0 - ms_ssim_val
-
-            loss = l1_weight * l1 + ms_ssim_weight * ms_ssim_loss
-
-        if scaler is not None and device == "cuda":
-            scaler.scale(loss).backward()
-            scaler.step(optim)
-            scaler.update()
-        else:
-            loss.backward()
-            optim.step()
-
-        if ema is not None:
-            ema.update(model)
-
-        running += loss.item()
-
-    return running / max(1, len(loader))
-
-@torch.no_grad()
-def validate(model, loader, device, ms_weight=0.9):
-    model.eval()
-    running = 0.0
-
-    for lf, hf in loader:
-        lf = lf.to(device, non_blocking=True)
-        hf = hf.to(device, non_blocking=True)
-
-        amp_ctx = autocast(device_type="cuda") if device == "cuda" else contextlib.nullcontext()
-        with amp_ctx:
-            pred = model(lf)
-            loss = compute_loss(pred, hf, ms_weight=ms_weight)
-
-        running += loss.item()
-
-    return running / max(1, len(loader))
-
-# Persistent cache for validation volumes to avoid resampling every epoch
-_validation_volume_cache = {}
-
-@torch.no_grad()
-def validate_metric(stage1, pairs, device, ema=None, refiner=None, patch_size=96, 
-                    stride=48, max_volumes=None, slice_stride=1, stack_size=7):
-    stage1.eval()
-    if refiner is not None:
-        refiner.eval()
-    total_ssim = 0.0
-    total_ms_ssim = 0.0
-    total_psnr = 0.0
-    total_slices = 0
-
-    for idx, (lf_path, hf_path) in enumerate(pairs):
-        if max_volumes is not None and idx >= max_volumes:
-            break
-
-        cache_key = (lf_path, hf_path)
-        if cache_key in _validation_volume_cache:
-            lf, hf = _validation_volume_cache[cache_key]
-        else:
-            lf, hf = load_pair_resample_normalize(lf_path, hf_path, interp_order=1)
-            _validation_volume_cache[cache_key] = (lf, hf)
-        ema_backup = None
-        if ema is not None:
-            ema_backup = ema.apply_to(stage1)
-        pred = predict_volume(stage1, lf, refiner=refiner, patch_size=patch_size, stride=stride, device=device, stack_size=stack_size)
-        if ema is not None:
-            ema.restore(stage1, ema_backup)
-        pred = np.clip(pred, 0.0, 1.0)
-
-        for z in range(0, hf.shape[2], slice_stride):
-            gt_slice = hf[:, :, z]
-            pred_slice = pred[:, :, z]
-
-            total_ssim += ssim_2d_metric(gt_slice, pred_slice)
-            total_ms_ssim += ms_ssim_2d_metric(gt_slice, pred_slice)
-            total_psnr += psnr_2d_metric(gt_slice, pred_slice)
-            total_slices += 1
-
-    if total_slices == 0:
-        return 0.0, 0.0, 0.0, 0.0, 0
-
-    mean_ssim = total_ssim / total_slices
-    mean_ms_ssim = total_ms_ssim / total_slices
-    mean_psnr = total_psnr / total_slices
-    score = mean_ms_ssim  # Competition metric: MS-SSIM only
-    return score, mean_ssim, mean_ms_ssim, mean_psnr, total_slices
-
 @torch.inference_mode()
 def predict_volume_batched_xy(
     stage1, volume, refiner=None,
     patch_size=96, stride=48, device="cpu", stack_size=7,
     use_amp=True,
-    microbatch=32,          # <--- important
+    microbatch=32,
 ):
     stage1.eval()
     if refiner is not None:
@@ -393,7 +270,7 @@ def predict_volume_batched_xy(
         preds_all = []
         with autocast_ctx:
             for s in range(0, patch_t.shape[0], microbatch):
-                mb = patch_t[s:s+microbatch]
+                mb = patch_t[s:s + microbatch]
                 if refiner is None:
                     out = stage1(mb)  # (mb,1,H,W)
                 else:
@@ -415,3 +292,58 @@ def predict_volume_batched_xy(
         pred_vol[:, :, z] = accum / np.maximum(weight, 1e-8)
 
     return pred_vol
+
+
+def validate_metric(stage1, pairs, device, ema=None, refiner=None, patch_size=96,
+                    stride=48, max_volumes=None, slice_stride=1, stack_size=7):
+    """
+    Kept (trimmed) since you likely use it to approximate competition scoring.
+    Uses only MS-SSIM in [0,1] space like your inference.
+    """
+    stage1.eval()
+    if refiner is not None:
+        refiner.eval()
+
+    total_ms_ssim = 0.0
+    total_slices = 0
+
+    for idx, (lf_path, hf_path) in enumerate(pairs):
+        if max_volumes is not None and idx >= max_volumes:
+            break
+
+        cache_key = (lf_path, hf_path)
+        if cache_key in _validation_volume_cache:
+            lf, hf = _validation_volume_cache[cache_key]
+        else:
+            lf, hf = load_pair_resample_normalize(lf_path, hf_path, interp_order=1)
+            _validation_volume_cache[cache_key] = (lf, hf)
+
+        ema_backup = None
+        if ema is not None:
+            ema_backup = ema.apply_to(stage1)
+
+        pred = predict_volume_batched_xy(
+            stage1, lf, refiner=refiner,
+            patch_size=patch_size, stride=stride, device=device, stack_size=stack_size,
+            use_amp=(device == "cuda"),
+        )
+
+        if ema is not None:
+            ema.restore(stage1, ema_backup)
+
+        pred = np.clip(pred, 0.0, 1.0)
+
+        # MS-SSIM per slice
+        for z in range(0, hf.shape[2], slice_stride):
+            gt = np.clip(hf[:, :, z], 0.0, 1.0)
+            pr = pred[:, :, z]
+
+            t1 = torch.from_numpy(pr).float()[None, None].to(device)
+            t2 = torch.from_numpy(gt).float()[None, None].to(device)
+            total_ms_ssim += float(ms_ssim_2d_torch(t1, t2).item())
+            total_slices += 1
+
+    if total_slices == 0:
+        return 0.0, 0
+
+    return total_ms_ssim / total_slices, total_slices

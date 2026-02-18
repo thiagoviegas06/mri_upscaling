@@ -5,6 +5,52 @@ from torch.utils.data import Dataset
 import nibabel as nib
 from nibabel.processing import resample_from_to
 
+def lf_minmax_params(lf, p_low=1, p_high=99, eps=1e-6):
+    """
+    Compute (lo, hi) from LF only. Robust percentile fallback to min/max.
+    Returns: (lo, hi, is_degenerate)
+    """
+    lo, hi = np.percentile(lf, [p_low, p_high])
+    if hi <= lo + eps:
+        lo, hi = float(np.min(lf)), float(np.max(lf))
+        if hi <= lo + eps:
+            return 0.0, 1.0, True
+    return float(lo), float(hi), False
+
+def apply_lf_minmax(x, lo, hi, eps=1e-6, clip=True):
+    """
+    Apply min-max using provided (lo, hi).
+    clip=True keeps outputs ~[0,1]. clip=False preserves out-of-range values.
+    """
+    if clip:
+        x = np.clip(x, lo, hi)
+    x = (x - lo) / (hi - lo + eps)
+    return x.astype(np.float32)
+
+def normalize_from_lf(lf, hf=None, *, p_low=1, p_high=99, eps=1e-6, clip=True):
+    """
+    Canonical normalization used by BOTH training and inference.
+
+    - (lo, hi) computed from LF only.
+    - LF always normalized.
+    - If HF provided, HF normalized using SAME (lo, hi).
+    """
+    lo, hi, deg = lf_minmax_params(lf, p_low=p_low, p_high=p_high, eps=eps)
+
+    if deg:
+        lf_n = np.zeros_like(lf, np.float32)
+        if hf is None:
+            return lf_n, (lo, hi)
+        return lf_n, np.zeros_like(hf, np.float32), (lo, hi)
+
+    lf_n = apply_lf_minmax(lf, lo, hi, eps=eps, clip=clip)
+
+    if hf is None:
+        return lf_n, (lo, hi)
+
+    hf_n = apply_lf_minmax(hf, lo, hi, eps=eps, clip=clip)
+    return lf_n, hf_n, (lo, hi)
+
 
 def fg_frac_np(patch2d: np.ndarray, thresh: float = 0.05) -> float:
     # patch2d: (H,W) float32
@@ -37,7 +83,8 @@ def preprocess_pair_from_lf_stats(lf, hf, p_low=1, p_high=99, eps=1e-6):
     hf_n = (hf_c - lo) / (hi - lo + eps)
     return lf_n.astype(np.float32), hf_n.astype(np.float32)
 
-def load_pair_resample_normalize(lf_path, hf_path, interp_order=1):
+def load_pair_resample_normalize(lf_path, hf_path, interp_order=1, *,
+                                 p_low=1, p_high=99, eps=1e-6, clip=True):
     lf_img = nib.load(lf_path)
     hf_img = nib.load(hf_path)
 
@@ -46,22 +93,25 @@ def load_pair_resample_normalize(lf_path, hf_path, interp_order=1):
     lf = lf_resampled_img.get_fdata().astype(np.float32)
     hf = hf_img.get_fdata().astype(np.float32)
 
-    lf, hf = preprocess_pair_from_lf_stats(lf, hf)
+    lf, hf, (lo, hi) = normalize_from_lf(
+        lf, hf, p_low=p_low, p_high=p_high, eps=eps, clip=clip
+    )
 
     if lf.shape != hf.shape:
         raise ValueError(f"LF/HF shape mismatch: {lf.shape} vs {hf.shape}")
-
     if not (np.isfinite(lf).all() and np.isfinite(hf).all()):
         raise ValueError("Non-finite values found after preprocessing")
 
-    # Optional sanity: ranges should be roughly within [0,1]
-    # (allow tiny numerical spill)
-    if lf.min() < -1e-3 or lf.max() > 1.0 + 1e-3:
-        print(f"[warn] LF out of expected range: min={lf.min():.4g}, max={lf.max():.4g}")
-    if hf.min() < -1e-3 or hf.max() > 1.0 + 1e-3:
-        print(f"[warn] HF out of expected range: min={hf.min():.4g}, max={hf.max():.4g}")
+    return lf, hf, (lo, hi)
 
-    return lf, hf  # numpy arrays, same shape (179,221,200)
+def normalize_lf_for_inference(lf, *, p_low=1, p_high=99, eps=1e-6, clip=True):
+    lf_n, (lo, hi) = normalize_from_lf(
+        lf, hf=None, p_low=p_low, p_high=p_high, eps=eps, clip=clip
+    )
+    return lf_n, (lo, hi)
+
+def denormalize_to_lf_scale(x_n, lo, hi, eps=1e-6):
+    return (x_n * (hi - lo + eps) + lo).astype(np.float32)
 
 def normalize_lf_like_training(lf, p_low=1, p_high=99, eps=1e-6):
     """
@@ -79,6 +129,8 @@ def normalize_lf_like_training(lf, p_low=1, p_high=99, eps=1e-6):
     lf_n = (lf_c - lo) / (hi - lo + eps)
 
     return lf_n.astype(np.float32)
+
+
 
 def preprocess_pair_from_lf_stats(lf, hf, p_low=1, p_high=99, eps=1e-6):
     lo, hi = np.percentile(lf, [p_low, p_high])

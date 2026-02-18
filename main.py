@@ -15,6 +15,7 @@ from model import UNet2_5D
 from train import EMA, train_one_epoch, validate, validate_metric
 from preprocessing import MRIPatchDataset
 
+
 def make_pairs(lf_dir, hf_dir):
     pairs = []
     for fname in sorted(os.listdir(lf_dir)):
@@ -34,19 +35,20 @@ def split_pairs(pairs, val_frac=0.2, seed=42):
     n_val = max(1, int(len(pairs) * val_frac))
     return pairs[n_val:], pairs[:n_val]
 
+
 if __name__ == "__main__":
     patch_size = 96
     stack_size = 7
-    warmup_epochs = 20
-    # Since competition metric is MS-SSIM, weight it heavily
-    ms_ssim_weight_start = 0.7  # weight for (1 - MS-SSIM) in loss
-    l1_weight_start = 0.3      # weight for L1 in loss (helps with convergence)
-    ms_ssim_weight_final = 0.85  # Final: mostly MS-SSIM since that's the metric
-    l1_weight_final = 0.15
 
-    pairs = make_pairs("/scratch/tjv235/pytorch-example/mri_upscaling/mri_resolution/train/low_field", 
-    "/scratch/tjv235/pytorch-example/mri_upscaling/mri_resolution/train/high_field")
-    
+    # Weight schedule for loss = (1-ms_weight)*L1 + ms_weight*(1-MS-SSIM)
+    warmup_epochs = 20
+    ms_weight_start = 0.70
+    ms_weight_final = 0.85
+
+    pairs = make_pairs(
+        "/scratch/tjv235/pytorch-example/mri_upscaling/mri_resolution/train/low_field",
+        "/scratch/tjv235/pytorch-example/mri_upscaling/mri_resolution/train/high_field",
+    )
     train_pairs, val_pairs = split_pairs(pairs, val_frac=0.2, seed=42)
 
     print("Num pairs:", len(pairs))
@@ -63,7 +65,7 @@ if __name__ == "__main__":
         stack_size=stack_size,
         sample_strategy="filtered",
     )
-    val_ds   = MRIPatchDataset(
+    val_ds = MRIPatchDataset(
         val_pairs,
         patch_size=patch_size,
         patches_per_volume=16,
@@ -80,11 +82,12 @@ if __name__ == "__main__":
     optim1 = torch.optim.AdamW(stage1.parameters(), lr=1e-4, weight_decay=1e-5)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optim1,
-        mode="max",
+        mode="max",        # maximize MS-SSIM score
         factor=0.5,
         patience=5,
         min_lr=1e-5,
     )
+
     scaler = GradScaler("cuda") if device == "cuda" else None
     ema = EMA(stage1, decay=0.999)
 
@@ -92,35 +95,52 @@ if __name__ == "__main__":
     best_epoch = 0
     patience = 12
     epochs_no_improve = 0
+
     save_dir = os.environ.get("MODEL_DESTINATION_METRIC", "checkpoints_metric")
     os.makedirs(save_dir, exist_ok=True)
     best_path = os.path.join(save_dir, "best.ckpt")
 
     num_epochs = 40
     for epoch in range(1, num_epochs + 1):
-        # --- inside epoch loop ---
+        # linear schedule ms_weight
         if warmup_epochs > 0:
-            t = min(1.0, (epoch - 1) / max(1, warmup_epochs - 1))  # epoch=1 -> 0.0, epoch=warmup_epochs -> 1.0
+            t = min(1.0, (epoch - 1) / max(1, warmup_epochs - 1))
         else:
             t = 1.0
+        ms_weight = ms_weight_start + t * (ms_weight_final - ms_weight_start)
 
-        ms_ssim_weight = ms_ssim_weight_start + t * (ms_ssim_weight_final - ms_ssim_weight_start)
-        l1_weight      = l1_weight_start      + t * (l1_weight_final      - l1_weight_start)
+        train_loss = train_one_epoch(
+            stage1,
+            train_loader,
+            optim1,
+            device,
+            scaler=scaler,
+            ema=ema,
+            ms_weight=ms_weight,
+        )
 
-        train_loss = train_one_epoch(stage1, train_loader, optim1, device, scaler, ema=ema, ms_ssim_weight=ms_ssim_weight, l1_weight=l1_weight)
-
+        # Evaluate with EMA weights
         ema_backup = ema.apply_to(stage1)
-        val_loss = validate(stage1, val_loader, device)  # Optionally update to use ms_ssim_weight if needed
-        val_score, val_ms_ssim, val_ssim, val_psnr, val_slices = validate_metric(
+
+        val_loss = validate(stage1, val_loader, device, ms_weight=ms_weight)
+
+        # Approx competition score: mean MS-SSIM over slices
+        val_score, val_slices = validate_metric(
             stage1,
             val_pairs,
             device,
+            ema=None,                 # already applied ema weights above
+            refiner=None,
             patch_size=patch_size,
             stride=patch_size // 2,
+            max_volumes=None,
+            slice_stride=1,
             stack_size=stack_size,
         )
+
         ema.restore(stage1, ema_backup)
 
+        # Save periodic checkpoints
         if epoch % 5 == 0:
             epoch_path = os.path.join(save_dir, f"epoch_{epoch:02d}.ckpt")
             torch.save(
@@ -129,24 +149,25 @@ if __name__ == "__main__":
                     "model": stage1.state_dict(),
                     "ema": ema.state_dict(),
                     "optim": optim1.state_dict(),
+                    "train_loss": train_loss,
                     "val_loss": val_loss,
                     "val_score": val_score,
-                    "val_ssim": val_ssim,
-                    "val_ms_ssim": val_ms_ssim,
-                    "val_psnr": val_psnr,
+                    "val_slices": val_slices,
+                    "ms_weight": ms_weight,
                 },
-                epoch_path
+                epoch_path,
             )
             print("Saved epoch checkpoint to:", epoch_path)
 
         print(
             f"epoch {epoch:02d} | train loss: {train_loss:.5f} | val loss: {val_loss:.5f} "
-            f"| val MS-SSIM: {val_score:.5f} (SSIM: {val_ssim:.5f}, PSNR: {val_psnr:.2f}, n={val_slices}) "
-            f"| ms_ssim_w {ms_ssim_weight:.2f} l1_w {l1_weight:.2f}"
+            f"| val MS-SSIM: {val_score:.5f} (n_slices={val_slices}) | ms_weight {ms_weight:.2f}"
         )
 
+        # Scheduler monitors actual metric
         scheduler.step(val_score)
 
+        # Track best model by metric
         if val_score > best_val:
             best_val = val_score
             best_epoch = epoch
@@ -157,23 +178,22 @@ if __name__ == "__main__":
                     "model": stage1.state_dict(),
                     "ema": ema.state_dict(),
                     "optim": optim1.state_dict(),
+                    "train_loss": train_loss,
                     "val_loss": val_loss,
                     "val_score": val_score,
-                    "val_ssim": val_ssim,
-                    "val_ms_ssim": val_ms_ssim,
-                    "val_psnr": val_psnr,
+                    "val_slices": val_slices,
+                    "ms_weight": ms_weight,
                 },
-                best_path
+                best_path,
             )
             print("Saved best to:", best_path)
         else:
             epochs_no_improve += 1
             if epochs_no_improve >= patience:
-                print(
-                    f"Early stopping at epoch {epoch:02d} (best epoch {best_epoch:02d}, score {best_val:.5f})"
-                )
+                print(f"Early stopping at epoch {epoch:02d} (best epoch {best_epoch:02d}, score {best_val:.5f})")
                 break
 
+    # Write minimal "best overall" artifact
     best_overall_path = os.path.join(save_dir, "best_overall.ckpt")
     best_stage1_ckpt = torch.load(best_path, map_location=device)
     torch.save(

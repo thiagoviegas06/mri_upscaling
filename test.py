@@ -6,7 +6,7 @@ import torch
 from nibabel.processing import resample_from_to
 
 from model import UNet2_5D
-from preprocessing import  normalize_lf_like_training
+from preprocessing import  normalize_lf_for_inference, denormalize_to_lf_scale
 from train import predict_volume_batched_xy
 from mri_resolution.extract_slices import create_submission_df
 
@@ -58,7 +58,7 @@ def main():
         lf_resampled = resample_from_to(lf_img, hf_template, order=1)
 
         volume = lf_resampled.get_fdata().astype(np.float32)
-        volume = normalize_lf_like_training(volume)
+        volume, (_,_) = normalize_lf_for_inference(volume)
 
         pred = predict_volume_batched_xy(
             model,
@@ -72,6 +72,7 @@ def main():
         )
 
         pred = np.clip(pred, 0.0, 1.0)
+        pred = denormalize_to_lf_scale(pred, lo=1, hi=99)
         predictions[sample_id] = pred
 
     df = create_submission_df(predictions)
