@@ -60,7 +60,7 @@ if __name__ == "__main__":
     train_ds = MRIPatchDataset(
         train_pairs,
         patch_size=patch_size,
-        patches_per_volume=64,
+        patches_per_volume=128,
         cache_volumes=True,
         stack_size=stack_size,
         sample_strategy="filtered",
@@ -77,13 +77,13 @@ if __name__ == "__main__":
     val_loader   = DataLoader(val_ds,   batch_size=2, shuffle=False, num_workers=0, pin_memory=True)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    stage1 = UNet2_5D(in_ch=stack_size, base=128).to(device)
+    stage1 = UNet2_5D(in_ch=stack_size, base=128, dropout_p=0.2).to(device)
 
     optim1 = torch.optim.AdamW(stage1.parameters(), lr=1e-4, weight_decay=1e-2)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optim1,
         mode="max",        # maximize MS-SSIM score
-        factor=0.5,
+        factor=0.7,
         patience=3
     )
 
