@@ -7,7 +7,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.cuda.amp import GradScaler, autocast # Import for Mixed Precision
 from preprocessing import MRIPatchDataset
-from model import DiTMSR
+from ditsmr import DiTMSR
 
 # ==========================================
 # Helpers
