@@ -129,7 +129,7 @@ def main():
     # You might want to lower this from 5e-4 to 1e-4 or 5e-5 to preserve features
     optim = torch.optim.AdamW(refiner.parameters(), lr=1e-4, weight_decay=1e-4)
     
-    # 2. Add a Scheduler (same as in your original train.py)
+    # 5. Add a Scheduler (same as in your original train.py)
     # This protects you: if 5e-4 is too high and loss jumps, it will drop the LR.
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optim,
@@ -143,7 +143,7 @@ def main():
     # Optional: EMA for Refiner
     # ema = EMA(refiner, decay=0.999)
 
-    # 5. Cascaded Model for Validation
+    # 6. Cascaded Model for Validation
     # This wraps (UNet + Refiner) to look like a single 3D model to the validator
     cascaded_model = CascadedModel(unet, refiner, device=DEVICE)
 
