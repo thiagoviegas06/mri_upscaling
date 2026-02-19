@@ -10,11 +10,12 @@ from main import make_pairs, split_pairs
 from model import UNet3D
 from train import validate, validate_metric, EMA
 from preprocessing import load_pair_resample_normalize, MRIPatchDataset
-from refiner_model import RRDBNet, CascadedModel
+from refiner_model import GrayscaleRealESRGAN_1x, CascadedModel
 
 # --- Configuration ---
 UNET_CHECKPOINT = "checkpoints/best.ckpt"
 REFINER_CHECKPOINT = "checkpoints/refiner_best.ckpt"
+REALESRGAN_PATH = "/content/RealESRGAN_x4plus.pth"
 BATCH_SIZE = 16
 PATCH_SIZE = 96
 NUM_EPOCHS = 20
@@ -115,8 +116,18 @@ def main():
     val_loader = DataLoader(val_ds, batch_size=2, shuffle=False, pin_memory=True)
 
     # 4. Setup Refiner
-    refiner = RRDBNet(in_nc=1, out_nc=1, nf=64, nb=4).to(DEVICE)
-    optim = torch.optim.AdamW(refiner.parameters(), lr=5e-4, weight_decay=1e-4)
+    print(f"Loading Real-ESRGAN weights from {REALESRGAN_PATH}...")
+    
+    # OLD
+    # refiner = RRDBNet(in_nc=1, out_nc=1, nf=64, nb=4).to(DEVICE)
+    
+    # NEW
+    # This automatically loads the pretrained weights and performs the 1x/1-channel surgery
+    refiner = GrayscaleRealESRGAN_1x(model_path=REALESRGAN_PATH, device=DEVICE).to(DEVICE)
+    
+    # Note: We use a smaller learning rate because the body is already pretrained
+    # You might want to lower this from 5e-4 to 1e-4 or 5e-5 to preserve features
+    optim = torch.optim.AdamW(refiner.parameters(), lr=1e-4, weight_decay=1e-4)
     
     # 2. Add a Scheduler (same as in your original train.py)
     # This protects you: if 5e-4 is too high and loss jumps, it will drop the LR.
