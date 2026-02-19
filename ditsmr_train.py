@@ -5,8 +5,9 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
+from torch.cuda.amp import GradScaler, autocast # Import for Mixed Precision
 from preprocessing import MRIPatchDataset
-from ditsmr import DiTMSR
+from model import DiTMSR
 
 # ==========================================
 # Helpers
@@ -18,9 +19,12 @@ def get_args():
     parser.add_argument('--hf_dir', type=str, required=True, help='Path to 3T NifTI files')
     parser.add_argument('--stage', type=int, default=1, choices=[1, 2], help='1: Pretrain AE, 2: Train Diffusion')
     parser.add_argument('--epochs', type=int, default=100)
-    parser.add_argument('--batch_size', type=int, default=4)
+    # Reduced default batch size to 2 to be safe, rely on micro_batching for memory management
+    parser.add_argument('--batch_size', type=int, default=2) 
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--patch_size', type=int, default=64)
+    # New arg for memory control
+    parser.add_argument('--micro_batch_size', type=int, default=16, help='Number of slices processed in one forward pass to save memory')
     parser.add_argument('--checkpoint', type=str, default=None)
     parser.add_argument('--save_dir', type=str, default='./checkpoints')
     return parser.parse_args()
@@ -28,12 +32,11 @@ def get_args():
 def frequency_loss(pred, target):
     """
     Computes L2 loss in K-Space (Fourier Domain).
-    As per paper: ||K_DC - K_HR||_2
     """
+    # FFT must be done in float32 for stability, autocast might cast to fp16 otherwise
     fft_pred = torch.fft.fft2(pred.float())
     fft_target = torch.fft.fft2(target.float())
     
-    # We can use the magnitude or the full complex difference
     loss = torch.norm(fft_pred - fft_target, p=2) / pred.numel()
     return loss
 
@@ -41,12 +44,12 @@ def collate_patches(batch):
     """
     Batch is list of (LF, HF) tensors.
     LF/HF shape: (1, PatchSize, PatchSize, PatchSize) -> 3D
-    We need to stack them.
     """
-    lfs = torch.cat([item[0] for item in batch], dim=0) # (B, X, Y, Z)
+    # item[0] is (1, X, Y, Z), cat dim=0 gives (B, X, Y, Z)
+    lfs = torch.cat([item[0] for item in batch], dim=0) 
     hfs = torch.cat([item[1] for item in batch], dim=0)
     
-    # Add Channel dim (B, C, X, Y, Z)
+    # Add Channel dim -> (B, 1, X, Y, Z)
     lfs = lfs.unsqueeze(1)
     hfs = hfs.unsqueeze(1)
     return lfs, hfs
@@ -55,57 +58,79 @@ def collate_patches(batch):
 # Main Training Loops
 # ==========================================
 
-def train_stage1(model, loader, optimizer, device, epochs, save_dir):
+def train_stage1(model, loader, optimizer, device, epochs, save_dir, micro_batch_size):
     """
-    Stage 1: Train Encoders and Decoder using L1 + Frequency Loss.
-    This sets up the Latent Space and the Reconstruction capability.
+    Stage 1: Train Autoencoder with Gradient Accumulation (Micro-batching)
     """
     criterion_l1 = nn.L1Loss()
+    scaler = GradScaler() # For Mixed Precision
     
-    print("Starting Stage 1: Autoencoder Training...")
+    print(f"Starting Stage 1: Autoencoder Training (Micro-batch: {micro_batch_size})...")
     
     for epoch in range(epochs):
         model.train()
         epoch_loss = 0
         
         for i, (lf, hf) in enumerate(loader):
-            # Input: (B, 1, D, H, W). Paper uses 2D.
-            # We reshape to (B*D, 1, H, W) to treat slices as batch items
+            # Input: (B, 1, D, H, W)
+            # Reshape to 2D slices: (B*D, 1, H, W)
             b, c, d, h, w = lf.shape
-            lf = lf.permute(0, 2, 1, 3, 4).reshape(-1, c, h, w).to(device)
-            hf = hf.permute(0, 2, 1, 3, 4).reshape(-1, c, h, w).to(device)
+            lf_flat = lf.permute(0, 2, 1, 3, 4).reshape(-1, c, h, w)
+            hf_flat = hf.permute(0, 2, 1, 3, 4).reshape(-1, c, h, w)
             
+            # Shuffle slices to break volume coherence slightly (optional, but good for stability)
+            perm = torch.randperm(lf_flat.size(0))
+            lf_flat = lf_flat[perm]
+            hf_flat = hf_flat[perm]
+
+            num_slices = lf_flat.size(0)
             optimizer.zero_grad()
             
-            # Forward (Use Encoder -> Decoder directly)
-            # In Stage 1, we use LF as both input and 'reference' structure for itself
-            sr = model.forward_stage1(lf, lf)
+            # --- Micro-batch Loop ---
+            # Process the large batch in small chunks to fit in VRAM
+            batch_loss = 0
+            for start_idx in range(0, num_slices, micro_batch_size):
+                end_idx = min(start_idx + micro_batch_size, num_slices)
+                
+                # Move only the micro-batch to GPU
+                lf_micro = lf_flat[start_idx:end_idx].to(device)
+                hf_micro = hf_flat[start_idx:end_idx].to(device)
+                
+                # Mixed Precision Context
+                with autocast():
+                    sr = model.forward_stage1(lf_micro, lf_micro)
+                    loss_pixel = criterion_l1(sr, hf_micro)
+                    loss_freq = frequency_loss(sr, hf_micro)
+                    loss = loss_pixel + 0.1 * loss_freq
+                    # Scale loss by number of micro-batches to keep gradient magnitude consistent
+                    # (Simple averaging logic)
+                    loss = loss / (num_slices / micro_batch_size) 
+                
+                # Backward pass with Scaler
+                scaler.scale(loss).backward()
+                
+                # Detach to save memory and accumulate scalar for print
+                batch_loss += loss.item() * (num_slices / micro_batch_size)
+
+            # Update weights after processing all micro-batches
+            scaler.step(optimizer)
+            scaler.update()
             
-            loss_pixel = criterion_l1(sr, hf)
-            loss_freq = frequency_loss(sr, hf)
-            
-            loss = loss_pixel + 0.1 * loss_freq # Weighting from paper/heuristics
-            
-            loss.backward()
-            optimizer.step()
-            
-            epoch_loss += loss.item()
+            epoch_loss += batch_loss
             
             if i % 10 == 0:
-                print(f"Epoch {epoch} [{i}/{len(loader)}] Loss: {loss.item():.4f}")
+                print(f"Epoch {epoch} [{i}/{len(loader)}] Loss: {batch_loss:.4f}")
         
         print(f"Epoch {epoch} Avg Loss: {epoch_loss / len(loader):.4f}")
         
-        # Save
         if (epoch + 1) % 5 == 0:
             torch.save(model.state_dict(), os.path.join(save_dir, f'stage1_epoch_{epoch+1}.pth'))
 
-def train_stage2(model, loader, optimizer, device, epochs, save_dir):
+def train_stage2(model, loader, optimizer, device, epochs, save_dir, micro_batch_size):
     """
-    Stage 2: Train Diffusion Transformer (DiT) and fine-tune Decoder.
-    Freeze Encoders (mostly).
+    Stage 2: Diffusion Training with Micro-batching
     """
-    print("Starting Stage 2: Diffusion Training...")
+    print(f"Starting Stage 2: Diffusion Training (Micro-batch: {micro_batch_size})...")
     
     # Freeze Encoders
     for param in model.lr_encoder.parameters():
@@ -114,69 +139,76 @@ def train_stage2(model, loader, optimizer, device, epochs, save_dir):
         param.requires_grad = False
         
     model.set_noise_schedule(num_steps=1000)
+    scaler = GradScaler()
     
     for epoch in range(epochs):
         model.train()
         epoch_loss = 0
         
         for i, (lf, hf) in enumerate(loader):
-            # Reshape 3D -> 2D slices
             b, c, d, h, w = lf.shape
-            lf = lf.permute(0, 2, 1, 3, 4).reshape(-1, c, h, w).to(device)
-            hf = hf.permute(0, 2, 1, 3, 4).reshape(-1, c, h, w).to(device)
+            lf_flat = lf.permute(0, 2, 1, 3, 4).reshape(-1, c, h, w)
+            hf_flat = hf.permute(0, 2, 1, 3, 4).reshape(-1, c, h, w)
             
+            # Sample timestep for the WHOLE batch first (or per slice, let's do per slice for diversity)
+            t_all = torch.randint(0, 1000, (lf_flat.size(0),), device=device).long()
+            
+            num_slices = lf_flat.size(0)
             optimizer.zero_grad()
             
-            # Sample timestep
-            t = torch.randint(0, 1000, (lf.shape[0],), device=device).long()
+            batch_loss_diff = 0
+            batch_loss_recon = 0
             
-            # 1. Diffusion Loss
-            # Input: LR (as conditioning context for diffusion? No, paper uses Ref)
-            # Paper: LR -> Latent. Noise added to Latent. Ref -> Condition.
-            # Since we only have LF/HF pairs, we treat LF as "Target" (Noisy) source and also as Condition?
-            # Actually, standard SR Diffusion: 
-            # Condition = LR Image. Target = HR Latent.
-            # Paper DiTMSR: Condition = Reference HR. Target = LR Latent (Denoising LR to HR? No).
-            # Clarification: Super Resolution generates HR.
-            # x0 = HR Latent. Condition = LR Latent.
-            # Let's map this: x0 comes from HF. Condition comes from LF.
-            
-            # CORRECT MAPPING for SR:
-            # We want to generate HF. So x0 is derived from HF.
-            # We condition on LF.
-            
-            # In forward_diffusion_train:
-            # x0 = self.encode(hf) (We want to learn distribution of HF latents)
-            # condition = self.encode(lf) (Guided by LF)
-            
-            # Note: The model.py `forward_diffusion_train` expects inputs.
-            # We pass HF as the target to be noised, LF as reference/condition.
-            pred_noise, noise = model.forward_diffusion_train(hf, lf, t)
-            
-            loss_diff = nn.MSELoss()(pred_noise, noise)
-            
-            # 2. Reconstruction Loss (Decoder Training)
-            # We also pass the Clean HF latent through decoder to ensure it maps to HF Image
-            # (Optional in standard LDM, but paper implies decoder is trained here too)
-            with torch.no_grad():
-                hf_latent = model.lr_encoder(hf) # Reuse LR encoder weights or HF specific? 
-                # Ideally we use an HR encoder for GT, but let's use the trained encoder.
-            
-            # Refine Decoder
-            lf_feat = model.lr_encoder(lf)
-            sr_recon = model.decoder(hf_latent, lf_feat)
-            loss_recon = nn.L1Loss()(sr_recon, hf) + 0.1 * frequency_loss(sr_recon, hf)
-            
-            loss = loss_diff + loss_recon
-            
-            loss.backward()
-            optimizer.step()
-            
-            epoch_loss += loss.item()
-            if i % 10 == 0:
-                print(f"Epoch {epoch} [{i}/{len(loader)}] Diff: {loss_diff.item():.4f} Recon: {loss_recon.item():.4f}")
+            # --- Micro-batch Loop ---
+            for start_idx in range(0, num_slices, micro_batch_size):
+                end_idx = min(start_idx + micro_batch_size, num_slices)
+                
+                lf_micro = lf_flat[start_idx:end_idx].to(device)
+                hf_micro = hf_flat[start_idx:end_idx].to(device)
+                t_micro = t_all[start_idx:end_idx] # t is already on device
+                
+                with autocast():
+                    # 1. Diffusion Loss
+                    # HF is x0 target, LF is condition
+                    pred_noise, noise = model.forward_diffusion_train(hf_micro, lf_micro, t_micro)
+                    loss_diff = nn.MSELoss()(pred_noise, noise)
+                    
+                    # 2. Reconstruction Loss
+                    # We usually train reconstruction on the clean path or estimated x0
+                    # Here we follow standard strategy: Train decoder to map encoded HF latent to HF image
+                    # Need to re-encode HF/LF for this part (activations not retained from diff step)
+                    with torch.no_grad():
+                        hf_latent = model.lr_encoder(hf_micro)
+                    
+                    lf_feat = model.lr_encoder(lf_micro)
+                    sr_recon = model.decoder(hf_latent, lf_feat)
+                    
+                    loss_recon_px = nn.L1Loss()(sr_recon, hf_micro)
+                    loss_recon_freq = frequency_loss(sr_recon, hf_micro)
+                    loss_recon = loss_recon_px + 0.1 * loss_recon_freq
+                    
+                    total_loss = loss_diff + loss_recon
+                    # Scale for accumulation
+                    total_loss = total_loss / (num_slices / micro_batch_size)
 
-        # Save
+                scaler.scale(total_loss).backward()
+                
+                # Stats
+                batch_loss_diff += loss_diff.item()
+                batch_loss_recon += loss_recon.item()
+
+            scaler.step(optimizer)
+            scaler.update()
+            
+            # Average out the losses for printing
+            avg_diff = batch_loss_diff / (num_slices / micro_batch_size)
+            avg_recon = batch_loss_recon / (num_slices / micro_batch_size)
+            
+            epoch_loss += (avg_diff + avg_recon)
+            
+            if i % 10 == 0:
+                print(f"Epoch {epoch} [{i}/{len(loader)}] Diff: {avg_diff:.4f} Recon: {avg_recon:.4f}")
+
         if (epoch + 1) % 5 == 0:
             torch.save(model.state_dict(), os.path.join(save_dir, f'stage2_epoch_{epoch+1}.pth'))
 
@@ -191,24 +223,41 @@ def main():
     if not os.path.exists(args.save_dir):
         os.makedirs(args.save_dir)
     
-    # Data Setup
-    # Assumes file pairs are lists of strings. 
-    # You need to implement a function to list your .nii.gz files from args.lf_dir / args.hf_dir
-    # For now, placeholder:
     lf_files = sorted([os.path.join(args.lf_dir, f) for f in os.listdir(args.lf_dir)])
     hf_files = sorted([os.path.join(args.hf_dir, f) for f in os.listdir(args.hf_dir)])
+    
+    # Validation
+    if len(lf_files) == 0:
+        raise ValueError(f"No files found in {args.lf_dir}")
+    if len(lf_files) != len(hf_files):
+        print(f"Warning: Number of LF files ({len(lf_files)}) != HF files ({len(hf_files)})")
+        # Truncate to shorter
+        min_len = min(len(lf_files), len(hf_files))
+        lf_files = lf_files[:min_len]
+        hf_files = hf_files[:min_len]
+
     pairs = list(zip(lf_files, hf_files))
     
+    # 32 patches per volume * batch size 2 = 64 patches per step.
+    # 64 patches * 64 depth = 4096 slices total per step.
+    # Processing 4096 slices at once is impossible.
+    # Micro-batching of 16 means 256 micro-steps. This will work on 40GB easily.
     dataset = MRIPatchDataset(
         pairs, 
         patch_size=args.patch_size, 
         patches_per_volume=32, 
-        cache_volumes=False # Turn off if memory is tight
+        cache_volumes=False 
     )
     
-    loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, collate_fn=collate_patches)
+    loader = DataLoader(
+        dataset, 
+        batch_size=args.batch_size, 
+        shuffle=True, 
+        collate_fn=collate_patches,
+        num_workers=4,
+        pin_memory=True
+    )
     
-    # Model Setup
     model = DiTMSR(device=device).to(device)
     
     if args.checkpoint:
@@ -218,9 +267,9 @@ def main():
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     
     if args.stage == 1:
-        train_stage1(model, loader, optimizer, device, args.epochs, args.save_dir)
+        train_stage1(model, loader, optimizer, device, args.epochs, args.save_dir, args.micro_batch_size)
     elif args.stage == 2:
-        train_stage2(model, loader, optimizer, device, args.epochs, args.save_dir)
+        train_stage2(model, loader, optimizer, device, args.epochs, args.save_dir, args.micro_batch_size)
 
 if __name__ == '__main__':
     main()
