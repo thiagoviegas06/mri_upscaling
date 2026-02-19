@@ -38,12 +38,12 @@ def split_pairs(pairs, val_frac=0.2, seed=42):
 
 if __name__ == "__main__":
     patch_size = 96
-    stack_size = 7
+    stack_size = 11
 
     # Weight schedule for loss = (1-ms_weight)*L1 + ms_weight*(1-MS-SSIM)
-    warmup_epochs = 20
-    ms_weight_start = 0.70
-    ms_weight_final = 0.85
+    warmup_epochs = 30
+    ms_weight_start = 0.50
+    ms_weight_final = 0.65
 
     pairs = make_pairs(
         "/scratch/tjv235/pytorch-example/mri_upscaling/mri_resolution/train/low_field",
@@ -68,7 +68,7 @@ if __name__ == "__main__":
     val_ds = MRIPatchDataset(
         val_pairs,
         patch_size=patch_size,
-        patches_per_volume=16,
+        patches_per_volume=64,
         cache_volumes=True,
         stack_size=stack_size,
     )
@@ -77,15 +77,14 @@ if __name__ == "__main__":
     val_loader   = DataLoader(val_ds,   batch_size=2, shuffle=False, num_workers=0, pin_memory=True)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    stage1 = UNet2_5D(in_ch=stack_size, base=56).to(device)
+    stage1 = UNet2_5D(in_ch=stack_size, base=128).to(device)
 
-    optim1 = torch.optim.AdamW(stage1.parameters(), lr=1e-4, weight_decay=1e-5)
+    optim1 = torch.optim.AdamW(stage1.parameters(), lr=1e-4, weight_decay=1e-2)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optim1,
         mode="max",        # maximize MS-SSIM score
         factor=0.5,
-        patience=5,
-        min_lr=1e-5,
+        patience=3
     )
 
     scaler = GradScaler("cuda") if device == "cuda" else None

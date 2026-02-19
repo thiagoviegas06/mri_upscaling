@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from torch.amp import autocast
 
 from preprocessing import load_pair_resample_normalize
-from metric import _normalize_01, _gaussian_kernel_2d, _ssim_components, compute_ms_ssim
+from mri_resolution.metric import _normalize_01, _gaussian_kernel_2d, _ssim_components, compute_ms_ssim
 
 
 # ---------------------------
@@ -114,19 +114,18 @@ def ms_ssim_2d_torch(x, y, window_size=11, sigma=1.5, weights=None):
     return ms_ssim
 
 
-def compute_loss(pred, target, ms_weight=0.6):
-    """
-    Consistent loss: clamp BOTH pred and target to [0,1] for BOTH terms.
-    This matches your MS-SSIM behavior and your inference clipping strategy.
-    """
-    pred_c = pred.clamp(0.0, 1.0)
-    target_c = target.clamp(0.0, 1.0)
+def compute_loss(pred, target, ms_weight=0.7):
+    # Pred is already [0,1] from the model's Sigmoid
+    # Target is already [0,1] from your loader
+    
+    # We still clamp just to be safe from floating point errors
+    p = pred.clamp(0.0, 1.0)
+    t = target.clamp(0.0, 1.0)
 
-    l1 = F.l1_loss(pred_c, target_c)
-    ms_ssim_val = ms_ssim_2d_torch(pred_c, target_c)
-    ms_weight = float(ms_weight)
-    l1_weight = 1.0 - ms_weight
-    return l1_weight * l1 + ms_weight * (1.0 - ms_ssim_val)
+    l1 = F.l1_loss(p, t)
+    ms_ssim_val = ms_ssim_2d_torch(p, t)
+    
+    return (1.0 - ms_weight) * l1 + ms_weight * (1.0 - ms_ssim_val)
 
 
 # ---------------------------
@@ -339,8 +338,8 @@ def validate_metric(stage1, pairs, device, ema=None, refiner=None, patch_size=96
 
         # IMPORTANT: Kaggle does NOT clip; it min-max normalizes each slice.
         # Clipping can still be okay, but to match Kaggle most closely, skip it here.
-        # pred = np.clip(pred, 0.0, 1.0)
-
+        pred = np.clip(pred, 0.0, 1.0)
+        
         for z in range(0, hf.shape[2], slice_stride):
             gt_slice = hf[:, :, z]
             pr_slice = pred[:, :, z]

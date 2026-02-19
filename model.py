@@ -96,7 +96,7 @@ class UNet2_5D(nn.Module):
     Output: (B, out_ch, H, W) - predicted center slice
     This is the same architecture as UNet2D but named explicitly for 2.5D usage.
     """
-    def __init__(self, in_ch=1, out_ch=1, base=32, dropout_p=0.1):
+    def __init__(self, in_ch=1, out_ch=1, base=128, dropout_p=0.1):
         super().__init__()
         self.enc1 = ResidualBlock(in_ch, base)
         self.pool1 = nn.MaxPool2d(2)
@@ -119,7 +119,7 @@ class UNet2_5D(nn.Module):
         self.dec1 = ResidualBlock(base*2, base)
 
         self.out = nn.Conv2d(base, out_ch, 1)
-
+        self.activation = nn.Sigmoid()
     def forward(self, x):
         e1 = self.enc1(x)
         e2 = self.enc2(self.pool1(e1))
@@ -136,5 +136,8 @@ class UNet2_5D(nn.Module):
         d1 = self.up1(d2)
         e1_g = self.att1(e1, d1)
         d1 = self.dec1(torch.cat([d1, e1_g], dim=1))
+        
+        x = self.out(d1)
+        return self.activation(x) * 1.05 - 0.025
+ 
 
-        return self.out(d1)

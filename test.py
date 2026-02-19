@@ -23,8 +23,6 @@ def load_model(checkpoint_path="best.ckpt", device="cpu", base=56, use_ema=True,
     return model
 
 
-
-
 def get_hf_template(hf_dir="mri_resolution/train/high_field"):
     hf_dir = Path(hf_dir)
     hf_files = sorted(list(hf_dir.glob("*.nii")))
@@ -37,11 +35,11 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     stack_size = 7
 
-    checkpoint_path = "checkpoints_metric/best.ckpt"
+    checkpoint_path = "checkpoints_metric/best_overall.ckpt"
     model = load_model(
         checkpoint_path,
         device=device,
-        base=56,
+        base=128,
         use_ema=True,
         stack_size=stack_size,
     )
@@ -71,8 +69,7 @@ def main():
             microbatch=32,
         )
 
-        pred = np.clip(pred, 0.0, 1.0)
-       
+        np.clip(pred, 0, 1, out=pred)
         predictions[sample_id] = pred
 
     df = create_submission_df(predictions)
