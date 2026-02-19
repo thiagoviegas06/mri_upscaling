@@ -1,28 +1,29 @@
 # MRI Upscaling
 
 ## Overview
-Low-field to high-field MRI super-resolution using 2.5D UNet trained to maximize MS-SSIM.
+Low-field to high-field MRI super-resolution using a 2.5D UNet (stack of 7 slices, base channels 128) trained to maximize MS-SSIM.
 
 ## Model Workflow
 
 ### Architecture
-- **2.5D UNet**: Takes 5 adjacent LF slices as input channels (center ±2) and predicts the center HF slice
-- **Input**: `(B, 5, H, W)` — stack of 5 axial slices from low-field MRI
+- **2.5D UNet**: Takes 7 adjacent LF slices as input channels (center ±3) and predicts the center HF slice
+- **Input**: `(B, 7, H, W)` — stack of 7 axial slices from low-field MRI
 - **Output**: `(B, 1, H, W)` — single enhanced high-field slice
-- **Base channels**: 56 with residual blocks and attention gates
+- **Base channels**: 128 with residual blocks and attention gates
 
 ### Training Strategy
 1. **Dataset**: 2.5D patch-based sampling
    - Extracts 96×96 XY patches from random Z positions
-   - Stacks 5 adjacent LF slices as channels
+   - Stacks 7 adjacent LF slices as channels
    - Target: center HF slice
    - Augmentation: in-plane flips and 90° rotations
    - Foreground sampling: biases patches toward brain tissue
 
-2. **Loss Function**: MS-SSIM + L1
+2. **Loss Function**: MS-SSIM + L1 (optionally MSE)
    - Multi-Scale SSIM (aligned with evaluation metric)
    - Warmup schedule: 0.2 → 0.6 MS-SSIM weight over 5 epochs
    - Final: `0.4 * L1 + 0.6 * (1 - MS-SSIM)`
+   - Optionally, MSE can be added as an additional term for experimentation
 
 3. **Training Details**
    - Optimizer: AdamW (lr=2e-4, weight_decay=1e-4)
@@ -47,11 +48,12 @@ Low-field to high-field MRI super-resolution using 2.5D UNet trained to maximize
 
 ### File Structure
 ```
-preprocessing.py         # 2.5D dataset with slice stacking
-metric_model/
-  model.py              # UNet2D with attention gates
-  train.py              # Training loop, MS-SSIM loss, validation
-  main.py               # Training script with warmup
+preprocessing.py         # 2.5D dataset with slice stacking and normalization
+model.py                 # UNet2.5D with attention gates (base=128, stack_size=7)
+train.py                 # Training loop, MS-SSIM + L1 loss, validation
+main.py                  # Training script with warmup and config
+mri_resolution/metric.py # MS-SSIM and evaluation metrics
+test.py                  # Inference and testing script
 ```
 
 ### Evaluation Metric
