@@ -68,6 +68,7 @@ class RefinerUNet2D(nn.Module):
         self.dec1 = ResidualBlock(base * 2, base)
 
         self.out = nn.Conv2d(base, out_ch, 1)
+        self.register_buffer("delta_scale", torch.tensor(0.1))
 
     def forward(self, x):
         # Encoder
@@ -87,7 +88,8 @@ class RefinerUNet2D(nn.Module):
         e1_g = self.att1(e1, d1)
         d1 = self.dec1(torch.cat([d1, e1_g], dim=1))  # (B, base, ...)
 
-        return self.out(d1)            # (B, out_ch, H, W)
+        delta = self.out(d1) 
+        return delta * self.delta_scale
 
 class UNet2_5D(nn.Module):
     """

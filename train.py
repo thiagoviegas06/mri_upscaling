@@ -127,6 +127,36 @@ def compute_loss(pred, target, ms_weight=0.7):
     
     return (1.0 - ms_weight) * l1 + ms_weight * (1.0 - ms_ssim_val)
 
+def get_gradients(x):
+    """Computes the image gradients using Sobel filters."""
+    # Sobel kernels for x and y directions
+    kx = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=x.dtype, device=x.device).view(1, 1, 3, 3)
+    ky = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=x.dtype, device=x.device).view(1, 1, 3, 3)
+    
+    grad_x = F.conv2d(x, kx, padding=1)
+    grad_y = F.conv2d(x, ky, padding=1)
+    
+    # Return magnitude of the gradient
+    return torch.sqrt(grad_x**2 + grad_y**2 + 1e-8)
+
+def compute_refiner_loss(delta, pred, target, ms_weight=0.7, grad_weight=0.2):
+    # Total prediction
+    p = (pred + delta).clamp(0.0, 1.0)
+    t = target.clamp(0.0, 1.0)
+
+    # 1. Structural/Pixel Loss (L1 + MS-SSIM)
+    l1 = F.l1_loss(p, t)
+    ms_ssim_val = ms_ssim_2d_torch(p, t)
+    base_loss = (1.0 - ms_weight) * l1 + ms_weight * (1.0 - ms_ssim_val)
+
+    # 2. Gradient (Edge) Loss
+    # We want the 'sharpness' of our prediction to match the target
+    grad_p = get_gradients(p)
+    grad_t = get_gradients(t)
+    edge_loss = F.l1_loss(grad_p, grad_t)
+
+    return base_loss + (grad_weight * edge_loss)
+
 
 # ---------------------------
 # Train / Validate
@@ -176,21 +206,101 @@ def train_one_epoch(model, loader, optim, device, scaler=None, ema=None,
 
     return running / max(1, len(loader))
 
-
-@torch.no_grad()
-def validate(model, loader, device, ms_weight=0.9):
-    model.eval()
+def train_one_epoch_refiner(model, stage1, loader, optim, device, scaler=None, ema=None,
+                            ms_weight=0.9, grad_weight=0.2):
+    model.train()
+    stage1.eval() 
     running = 0.0
-
+    
     for lf, hf in loader:
-        lf = lf.to(device, non_blocking=True)
-        hf = hf.to(device, non_blocking=True)
+        lf = lf.to(device, non_blocking=True) # (B, stack, H, W)
+        hf = hf.to(device, non_blocking=True) # (B, 1, H, W)
+
+        optim.zero_grad(set_to_none=True)
 
         amp_ctx = autocast(device_type="cuda") if device == "cuda" else contextlib.nullcontext()
         with amp_ctx:
-            pred = model(lf)
-            pred_2d, hf_2d = _to_2d_slices(pred, hf)
-            loss = compute_loss(pred_2d, hf_2d, ms_weight=ms_weight)
+            with torch.no_grad():
+                pred_s1 = stage1(lf) # (B, 1, H, W)
+
+            # Extract center slice of LF to match Pred_S1 dimensions
+            # Assuming stack is the second dimension
+            center_idx = lf.shape[1] // 2
+            lf_center = lf[:, center_idx:center_idx+1, ...] 
+
+            # Refiner input: (B, 2, H, W)
+            inp = torch.cat([lf_center, pred_s1], dim=1)
+            delta = model(inp)
+
+            # Ensure everything is 2D for the loss functions
+            # Even if they are already 4D, this handles potential 5D volumes
+            d_2d, _ = _to_2d_slices(delta, hf)
+            p_s1_2d, hf_2d = _to_2d_slices(pred_s1, hf)
+
+            loss = compute_refiner_loss(d_2d, p_s1_2d, hf_2d, 
+                                        ms_weight=ms_weight, 
+                                        grad_weight=grad_weight)
+
+        if scaler is not None and device == "cuda":
+            scaler.scale(loss).backward()
+            scaler.step(optim)
+            scaler.update()
+        else:
+            loss.backward()
+            optim.step()
+
+        if ema is not None: ema.update(model)
+        running += float(loss.item())
+
+    return running / max(1, len(loader))
+
+
+@torch.no_grad()
+def validate(model, loader, device, refiner=None, ms_weight=0.9):
+    # If refiner is provided, 'model' is treated as Stage 1
+    model.eval()
+    if refiner is not None:
+        refiner.eval()
+    
+    running = 0.0
+
+    # For the refiner, we need to know the center slice index
+    # We can infer this from the stack size of the input
+    for lf, hf in loader:
+        lf = lf.to(device, non_blocking=True) # (B, stack, H, W)
+        hf = hf.to(device, non_blocking=True) # (B, 1, H, W)
+
+        amp_ctx = autocast(device_type="cuda") if device == "cuda" else contextlib.nullcontext()
+        with amp_ctx:
+            # Stage 1 prediction
+            pred_s1 = model(lf)
+            
+            if refiner is None:
+                # Stage 1 Mode
+                pred_final = pred_s1
+                pred_2d, hf_2d = _to_2d_slices(pred_final, hf)
+                loss = compute_loss(pred_2d, hf_2d, ms_weight=ms_weight)
+            else:
+                # Stage 2 (Refiner) Mode
+                center_idx = lf.shape[1] // 2
+                lf_center = lf[:, center_idx:center_idx+1, ...]
+                
+                inp = torch.cat([lf_center, pred_s1], dim=1)
+                delta = refiner(inp)
+                
+                # Apply the same limit/tanh as in prediction if you want val loss to be representative
+                limit = 0.15
+                delta = limit * torch.tanh(delta / limit)
+                
+                pred_final = pred_s1 + delta
+                
+                # Slicing for loss calculation
+                p_s1_2d, hf_2d = _to_2d_slices(pred_s1, hf)
+                delta_2d, _ = _to_2d_slices(delta, hf)
+                
+                # Use the refiner-specific loss
+                # Note: grad_weight can be set to 0 here if you just want to track L1/SSIM
+                loss = compute_refiner_loss(delta_2d, p_s1_2d, hf_2d, ms_weight=ms_weight)
 
         running += float(loss.item())
 
@@ -229,9 +339,10 @@ def _slice_stack(volume, z_center, stack_size):
     return np.stack(slices, axis=0)
 
 @torch.inference_mode()
+@torch.inference_mode()
 def predict_volume_batched_xy(
     stage1, volume, refiner=None,
-    patch_size=96, stride=48, device="cpu", stack_size=7,
+    patch_size=96, stride=48, device="cpu", stack_size=11, # Updated default to 11
     use_amp=True,
     microbatch=32,
 ):
@@ -247,9 +358,13 @@ def predict_volume_batched_xy(
     gaussian_window = _gaussian_window_2d(patch_size).astype(np.float32)
 
     if use_amp and (device != "cpu"):
+        # Note: Using bfloat16 is often more stable for MRI than float16 on H200
         autocast_ctx = torch.autocast(device_type="cuda", dtype=torch.float16)
     else:
         autocast_ctx = contextlib.nullcontext()
+
+    # Calculate center index once
+    center_idx = stack_size // 2
 
     for z in range(depth):
         accum = np.zeros((volume.shape[0], volume.shape[1]), dtype=np.float32)
@@ -264,26 +379,41 @@ def predict_volume_batched_xy(
                 patches.append(stack_full[:, x:x + patch_size, y:y + patch_size])
                 coords.append((x, y))
 
-        patches_np = np.stack(patches, axis=0).astype(np.float32)  # (B,C,H,W)
+        patches_np = np.stack(patches, axis=0).astype(np.float32)
         patch_t = torch.from_numpy(patches_np).to(device, non_blocking=True)
 
         preds_all = []
         with autocast_ctx:
             for s in range(0, patch_t.shape[0], microbatch):
                 mb = patch_t[s:s + microbatch]
+                
+                y1 = stage1(mb) # Output: (mb, 1, H, W)
+                
                 if refiner is None:
-                    out = stage1(mb)  # (mb,1,H,W)
+                    out = y1
                 else:
-                    y1 = stage1(mb)
-                    inp = torch.cat([mb, y1], dim=1)
+                    # CHANGE 1: Extract ONLY the center slice from the stack
+                    # mb is (B, stack_size, H, W), we want (B, 1, H, W)
+                    mb_center = mb[:, center_idx : center_idx + 1, :, :]
+                    
+                    # CHANGE 2: Concat center slice with Stage 1 prediction
+                    # Result is (B, 2, H, W)
+                    inp = torch.cat([mb_center, y1], dim=1)
+                    
                     delta = refiner(inp)
-                    limit = 0.2
+                    
+                    # CHANGE 3: Apply a soft limit to the delta (residual)
+                    # This prevents the refiner from "exploding" the prediction
+                    limit = 0.15 
                     delta = limit * torch.tanh(delta / limit)
+                    
                     out = y1 + delta
+                
                 preds_all.append(out)
 
-        pred_t = torch.cat(preds_all, dim=0)  # (B,1,H,W)
-        preds = pred_t.squeeze(1).float().cpu().numpy()  # (B,H,W)
+        pred_t = torch.cat(preds_all, dim=0)
+        # Ensure values stay in [0, 1] after the addition
+        preds = pred_t.clamp(0.0, 1.0).squeeze(1).float().cpu().numpy()
 
         for i, (x, y) in enumerate(coords):
             accum[x:x + patch_size, y:y + patch_size] += preds[i] * gaussian_window
@@ -327,9 +457,12 @@ def validate_metric(stage1, pairs, device, ema=None, refiner=None, patch_size=96
             ema_backup = ema.apply_to(stage1)
 
         pred = predict_volume_batched_xy(
-            stage1, lf, refiner=refiner,
-            patch_size=patch_size, stride=stride,
-            device=device, stack_size=stack_size,
+            stage1, lf, 
+            refiner=refiner,
+            patch_size=patch_size, 
+            stride=stride,
+            device=device, 
+            stack_size=stack_size,
             use_amp=(device == "cuda"),
         )
 

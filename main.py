@@ -11,8 +11,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from model import UNet2_5D
-from train import EMA, train_one_epoch, validate, validate_metric
+from model import RefinerUNet2D, UNet2_5D
+from train import EMA, train_one_epoch, train_one_epoch_refiner, validate, validate_metric
 from preprocessing import MRIPatchDataset
 
 
@@ -60,7 +60,7 @@ if __name__ == "__main__":
     train_ds = MRIPatchDataset(
         train_pairs,
         patch_size=patch_size,
-        patches_per_volume=128,
+        patches_per_volume=64,
         cache_volumes=True,
         stack_size=stack_size,
         sample_strategy="filtered",
@@ -77,13 +77,13 @@ if __name__ == "__main__":
     val_loader   = DataLoader(val_ds,   batch_size=2, shuffle=False, num_workers=0, pin_memory=True)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    stage1 = UNet2_5D(in_ch=stack_size, base=128, dropout_p=0.2).to(device)
+    stage1 = UNet2_5D(in_ch=stack_size, base=128).to(device)
 
     optim1 = torch.optim.AdamW(stage1.parameters(), lr=1e-4, weight_decay=1e-2)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optim1,
         mode="max",        # maximize MS-SSIM score
-        factor=0.7,
+        factor=0.5,
         patience=3
     )
 
@@ -204,3 +204,64 @@ if __name__ == "__main__":
         best_overall_path,
     )
     print("Saved overall best from stage1 to:", best_overall_path)
+
+    refiner_epochs = 20
+    print(f"\nStarting stage 2 refiner training for {refiner_epochs} epochs "
+          f"with stage1 best epoch {best_epoch:02d} as fixed backbone...")
+    
+    stage1.load_state_dict(torch.load(best_overall_path, map_location=device))
+    for param in stage1.parameters():
+        param.requires_grad = False
+    stage1.eval()
+
+    refiner = RefinerUNet2D(in_ch=2, base=32).to(device)
+
+    optim2 = torch.optim.AdamW(refiner.parameters(), lr=1e-4, weight_decay=1e-2)
+    scheduler2 = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optim2,
+        mode="max",
+        factor=0.5,
+        patience=3
+    )
+    scaler2 = GradScaler("cuda") if device == "cuda" else None
+    ema2 = EMA(refiner, decay=0.999)
+    best_refiner_val = float("-inf")
+
+    for epoch in range(1, refiner_epochs + 1):
+        # 1. Train
+        train_loss = train_one_epoch_refiner(
+            refiner, stage1, train_loader, optim2, device, 
+            scaler=scaler2, ema=ema2
+        )
+
+        # 2. Get Quick Val Loss (Optional, but good for tracking)
+        # Assuming you updated 'validate' to handle the refiner
+        v_loss = validate(stage1, val_loader, device, refiner=refiner, ms_weight=ms_weight_final)
+
+        # 3. Get Full Volume Metric (The one that matters for Kaggle)
+        val_score, val_slices = validate_metric(
+            stage1, val_pairs, device, refiner=refiner,
+            patch_size=patch_size, stack_size=stack_size, stride=patch_size // 2
+        )
+
+        print(
+            f"refiner epoch {epoch:02d} | train loss: {train_loss:.5f} | val loss: {v_loss:.5f} "
+            f"| val MS-SSIM: {val_score:.5f} (n_slices={val_slices})"
+        )
+
+        scheduler2.step(val_score)
+
+        if val_score > best_refiner_val:
+            best_refiner_val = val_score
+            best_refiner_epoch = epoch
+            torch.save({
+                "epoch": epoch,
+                "model": refiner.state_dict(),
+                "ema": ema2.state_dict(),
+                "optim": optim2.state_dict(),
+                "train_loss": train_loss,
+                "val_loss": v_loss, # Changed from val_loss to v_loss
+                "val_score": val_score,
+            }, os.path.join(save_dir, "refiner_best.ckpt")) # Constant name for the best one
+
+    print(f"Best refiner epoch: {best_refiner_epoch}, score: {best_refiner_val:.5f}")
