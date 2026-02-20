@@ -15,6 +15,8 @@ from model import UNet3D
 from train import EMA, train_one_epoch, validate, validate_metric
 from preprocessing import MRIPatchDataset
 
+MODEL_DESTINATION = "/content/mri_upscaling/checkpoints" 
+
 def make_pairs(lf_dir, hf_dir):
     pairs = []
     for fname in sorted(os.listdir(lf_dir)):
@@ -56,11 +58,11 @@ if __name__ == "__main__":
     )
     val_ds   = MRIPatchDataset(val_pairs,   patch_size=patch_size, patches_per_volume=16, cache_volumes=True)
 
-    train_loader = DataLoader(train_ds, batch_size=2, shuffle=True,  num_workers=4, pin_memory=True)
+    train_loader = DataLoader(train_ds, batch_size=8, shuffle=True,  num_workers=4, pin_memory=True)
     val_loader   = DataLoader(val_ds,   batch_size=2, shuffle=False, num_workers=2, pin_memory=True)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = UNet3D(base=56).to(device)
+    model = UNet3D(base=16).to(device)
     optim = torch.optim.AdamW(model.parameters(), lr=2e-4, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optim,
@@ -76,7 +78,7 @@ if __name__ == "__main__":
     best_epoch = 0
     patience = 8
     epochs_no_improve = 0
-    save_dir = os.environ.get("MODEL_DESTINATION", "checkpoints")
+    save_dir = MODEL_DESTINATION
     os.makedirs(save_dir, exist_ok=True)
     best_path = os.path.join(save_dir, "best.ckpt")
 

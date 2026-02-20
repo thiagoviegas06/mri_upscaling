@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 class DoubleConv(nn.Module):
     def __init__(self, in_ch, out_ch):
@@ -36,26 +35,8 @@ class ResidualBlock(nn.Module):
         out = self.act2(out + identity)
         return out
 
-class AttentionGate3D(nn.Module):
-    def __init__(self, in_ch, gating_ch, inter_ch):
-        super().__init__()
-        self.theta = nn.Conv3d(in_ch, inter_ch, 1, bias=False)
-        self.phi = nn.Conv3d(gating_ch, inter_ch, 1, bias=False)
-        self.psi = nn.Conv3d(inter_ch, 1, 1, bias=True)
-        self.norm = nn.InstanceNorm3d(inter_ch)
-        self.act = nn.LeakyReLU(0.1, inplace=True)
-        self.sigmoid = nn.Sigmoid()
-
-    def forward(self, x, g):
-        # x: skip connection, g: gating (decoder)
-        theta_x = self.theta(x)
-        phi_g = self.phi(g)
-        f = self.act(self.norm(theta_x + phi_g))
-        attn = self.sigmoid(self.psi(f))
-        return x * attn
-
 class UNet3D(nn.Module):
-    def __init__(self, in_ch=1, out_ch=1, base=32, dropout_p=0.1):
+    def __init__(self, in_ch=1, out_ch=1, base=16, dropout_p=0.1): # Changed base to 16
         super().__init__()
         self.enc1 = ResidualBlock(in_ch, base)
         self.pool1 = nn.MaxPool3d(2)
@@ -68,14 +49,13 @@ class UNet3D(nn.Module):
         self.bott_dropout = nn.Dropout3d(p=dropout_p)
 
         self.up3 = nn.ConvTranspose3d(base*8, base*4, 2, stride=2)
-        self.att3 = AttentionGate3D(base*4, base*4, base*2)
-        self.dec3 = ResidualBlock(base*8, base*4)
+        self.dec3 = ResidualBlock(base*8, base*4) # Cat e3(4) + d3(4) = 8 channels in
+        
         self.up2 = nn.ConvTranspose3d(base*4, base*2, 2, stride=2)
-        self.att2 = AttentionGate3D(base*2, base*2, base)
-        self.dec2 = ResidualBlock(base*4, base*2)
+        self.dec2 = ResidualBlock(base*4, base*2) # Cat e2(2) + d2(2) = 4 channels in
+        
         self.up1 = nn.ConvTranspose3d(base*2, base, 2, stride=2)
-        self.att1 = AttentionGate3D(base, base, base//2)
-        self.dec1 = ResidualBlock(base*2, base)
+        self.dec1 = ResidualBlock(base*2, base)   # Cat e1(1) + d1(1) = 2 channels in
 
         self.out = nn.Conv3d(base, out_ch, 1)
 
@@ -87,13 +67,13 @@ class UNet3D(nn.Module):
         b  = self.bott_dropout(b)
 
         d3 = self.up3(b)
-        e3_g = self.att3(e3, d3)
-        d3 = self.dec3(torch.cat([d3, e3_g], dim=1))
+        # Standard skip connection via concatenation
+        d3 = self.dec3(torch.cat([d3, e3], dim=1))
+        
         d2 = self.up2(d3)
-        e2_g = self.att2(e2, d2)
-        d2 = self.dec2(torch.cat([d2, e2_g], dim=1))
+        d2 = self.dec2(torch.cat([d2, e2], dim=1))
+        
         d1 = self.up1(d2)
-        e1_g = self.att1(e1, d1)
-        d1 = self.dec1(torch.cat([d1, e1_g], dim=1))
+        d1 = self.dec1(torch.cat([d1, e1], dim=1))
 
         return self.out(d1)
