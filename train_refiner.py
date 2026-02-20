@@ -112,7 +112,7 @@ def main():
             f"| val score: {val_score:.5f} (ssim {val_ssim:.5f}, psnr {val_psnr:.2f})"
         )
 
-        if val_loss > best_val_score:
+        if val_loss < best_val_score:
             best_val_score = val_loss
             torch.save({
                 "epoch": epoch,
