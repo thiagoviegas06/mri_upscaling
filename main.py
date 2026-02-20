@@ -69,7 +69,7 @@ if __name__ == "__main__":
         optim,
         mode="max",
         factor=0.5,
-        patience=5,
+        patience=20,
         min_lr=1e-5,
     )
     scaler = GradScaler("cuda") if device == "cuda" else None
@@ -79,7 +79,7 @@ if __name__ == "__main__":
 
     best_val = float("-inf")
     best_epoch = 0
-    patience = 8
+    patience = 20
     epochs_no_improve = 0
     save_dir = MODEL_DESTINATION
     os.makedirs(save_dir, exist_ok=True)
