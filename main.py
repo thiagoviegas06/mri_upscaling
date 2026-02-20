@@ -136,8 +136,8 @@ if __name__ == "__main__":
 
         scheduler.step(val_score)
 
-        if val_score > best_val:
-            best_val = val_score
+        if val_loss > best_val:
+            best_val = val_loss
             best_epoch = epoch
             epochs_no_improve = 0
             torch.save(
