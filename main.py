@@ -72,7 +72,7 @@ if __name__ == "__main__":
         min_lr=1e-5,
     )
     scaler = GradScaler("cuda") if device == "cuda" else None
-    ema = EMA(model, decay=0.999)
+    ema = EMA(model, decay=0.90)
 
     best_val = float("-inf")
     best_epoch = 0
@@ -82,8 +82,20 @@ if __name__ == "__main__":
     os.makedirs(save_dir, exist_ok=True)
     best_path = os.path.join(save_dir, "best.ckpt")
 
+    ramp_epochs = 15 
+    max_decay = 0.999
+    min_decay = 0.90
+
     num_epochs = 35
     for epoch in range(1, num_epochs + 1):
+        if epoch <= ramp_epochs:
+            # Linearly interpolate between min_decay and max_decay
+            current_decay = min_decay + (max_decay - min_decay) * (epoch / ramp_epochs)
+        else:
+            current_decay = max_decay
+            
+        ema.decay = current_decay
+        
         train_loss = train_one_epoch(model, train_loader, optim, device, scaler, ema=ema)
 
         ema_backup = ema.apply_to(model)

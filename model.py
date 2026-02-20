@@ -67,7 +67,6 @@ class UNet3D(nn.Module):
         b  = self.bott_dropout(b)
 
         d3 = self.up3(b)
-        # Standard skip connection via concatenation
         d3 = self.dec3(torch.cat([d3, e3], dim=1))
         
         d2 = self.up2(d3)
@@ -76,4 +75,6 @@ class UNet3D(nn.Module):
         d1 = self.up1(d2)
         d1 = self.dec1(torch.cat([d1, e1], dim=1))
 
-        return self.out(d1)
+        # Global Residual Learning: Predict the missing details and add to input
+        residual = self.out(d1)
+        return x + residual

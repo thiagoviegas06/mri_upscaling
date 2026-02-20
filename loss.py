@@ -3,6 +3,17 @@ import torch.nn as nn
 import torchvision.models as models
 import torchvision.transforms as T
 
+class CharbonnierLoss(nn.Module):
+    """L1-like loss that is differentiable at zero, standard for PSNR maximization."""
+    def __init__(self, eps=1e-3):
+        super(CharbonnierLoss, self).__init__()
+        self.eps2 = eps ** 2
+
+    def forward(self, pred, target):
+        diff = pred - target
+        loss = torch.sqrt(diff * diff + self.eps2)
+        return torch.mean(loss)
+
 class VGGPerceptualLoss(nn.Module):
     def __init__(self, feature_layers=[3, 8, 17, 26], use_l1=True, weights=[1.0, 1.0, 1.0, 1.0]):
         """
