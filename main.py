@@ -144,7 +144,7 @@ if __name__ == "__main__":
                 {
                     "epoch": epoch,
                     "model": model.state_dict(),
-                    "ema": ema.state_dict(),
+                    # "ema": ema.state_dict(),
                     "optim": optim.state_dict(),
                     "val_loss": val_loss,
                     "val_score": val_score,
