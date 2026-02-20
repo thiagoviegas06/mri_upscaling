@@ -100,7 +100,7 @@ def main():
     print("Starting Refiner Training...")
     for epoch in range(1, NUM_EPOCHS + 1):
         train_loss = train_refiner_one_epoch(refiner, train_loader, optim, scaler, criterion, DEVICE)
-        val_loss = validate(cascaded_model, val_loader, DEVICE)
+        val_loss = validate(cascaded_model, val_loader, DEVICE, criterion)
         val_score, val_ssim, val_psnr, val_slices = validate_metric(
             cascaded_model, val_pairs, DEVICE, patch_size=PATCH_SIZE, stride=PATCH_SIZE // 2
         )

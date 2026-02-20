@@ -12,7 +12,7 @@ from model import UNet3D
 from preprocessing import load_pair_resample_normalize
 from test import predict_volume_unet
 
-def load_model(checkpoint_path, device="cpu", base=56):
+def load_model(checkpoint_path, device="cpu", base=16):
     """Loads the UNet3D model from the specified checkpoint."""
     model = UNet3D(base=base).to(device)
     if not os.path.exists(checkpoint_path):
