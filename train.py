@@ -5,6 +5,8 @@ from torch.amp import autocast
 import torch.nn.functional as F
 
 from preprocessing import load_pair_resample_normalize
+from loss import MSSSIMLoss
+
 
 
 class EMA:
@@ -144,7 +146,7 @@ def predict_volume(model, volume, patch_size=96, stride=48, device="cpu"):
 
     return accum / np.maximum(weight, 1e-8)
 
-def train_one_epoch(model, loader, optim, device, scaler, ema=None):
+def train_one_epoch(model, loader, optim, device, scaler, criterion, ema=None):
     model.train()
     running = 0.0
 
@@ -157,9 +159,7 @@ def train_one_epoch(model, loader, optim, device, scaler, ema=None):
         amp_ctx = autocast(device_type="cuda") if device == "cuda" else contextlib.nullcontext()
         with amp_ctx:
             pred = model(lf)
-            l1 = F.l1_loss(pred, hf)
-            ssim = ssim_3d(pred, hf, data_range=1.0)
-            loss = l1 + (1.0 - ssim)
+            loss = criterion(pred, hf)
 
         if scaler is not None and device == "cuda":
             scaler.scale(loss).backward()
@@ -177,7 +177,7 @@ def train_one_epoch(model, loader, optim, device, scaler, ema=None):
     return running / max(1, len(loader))
 
 @torch.no_grad()
-def validate(model, loader, device):
+def validate(model, loader, device, criterion):
     model.eval()
     running = 0.0
 
@@ -188,9 +188,7 @@ def validate(model, loader, device):
         amp_ctx = autocast(device_type="cuda") if device == "cuda" else contextlib.nullcontext()
         with amp_ctx:
             pred = model(lf)
-            l1 = F.l1_loss(pred, hf)
-            ssim = ssim_3d(pred, hf, data_range=1.0)
-            loss = l1 + (1.0 - ssim)
+            loss = criterion(pred, hf)
 
         running += loss.item()
 

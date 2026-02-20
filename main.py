@@ -14,6 +14,7 @@ from torch.utils.data import DataLoader
 from model import UNet3D
 from train import EMA, train_one_epoch, validate, validate_metric
 from preprocessing import MRIPatchDataset
+from loss import MSSSIMLoss
 
 MODEL_DESTINATION = "/content/mri_upscaling/checkpoints" 
 
@@ -74,6 +75,8 @@ if __name__ == "__main__":
     scaler = GradScaler("cuda") if device == "cuda" else None
     # ema = EMA(model, decay=0.90)
 
+    criterion = MSSSIMLoss(alpha=0.84, data_range=1.0).to(device)
+
     best_val = float("-inf")
     best_epoch = 0
     patience = 8
@@ -96,10 +99,10 @@ if __name__ == "__main__":
             
         # ema.decay = current_decay
         
-        train_loss = train_one_epoch(model, train_loader, optim, device, scaler)#, ema=ema)
+        train_loss = train_one_epoch(model, train_loader, optim, device, scaler, criterion)#, ema=ema)
 
         # ema_backup = ema.apply_to(model)
-        val_loss = validate(model, val_loader, device)
+        val_loss = validate(model, val_loader, device, criterion)
         val_score, val_ssim, val_psnr, val_slices = validate_metric(
             model,
             val_pairs,

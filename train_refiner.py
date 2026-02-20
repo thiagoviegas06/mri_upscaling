@@ -9,14 +9,14 @@ from main import make_pairs, split_pairs
 from model import UNet3D
 from train import validate, validate_metric
 from preprocessing import load_pair_resample_normalize, MRIPatchDataset
-from loss import VGGPerceptualLoss
+from loss import MSSSIMLoss
 
 # --- NEW IMPORTS ---
 from refiner_model import SMPRefiner, CascadedModel
 
 UNET_CHECKPOINT = "checkpoints/best.ckpt"
 REFINER_CHECKPOINT = "checkpoints/refiner_best.ckpt"
-BATCH_SIZE = 16
+BATCH_SIZE = 64
 PATCH_SIZE = 96
 NUM_EPOCHS = 20
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -90,7 +90,7 @@ def main():
     
     # Restored learning rate to 1e-3 for a simpler architecture
     optim = torch.optim.AdamW(refiner.parameters(), lr=1e-3, weight_decay=1e-4)
-    criterion = VGGPerceptualLoss(use_l1=True).to(DEVICE)
+    criterion = MSSSIMLoss(alpha=0.84, data_range=1.0).to(DEVICE)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optim, mode="max", factor=0.5, patience=3, min_lr=1e-6)
     scaler = GradScaler()
     cascaded_model = CascadedModel(unet, refiner, device=DEVICE)
