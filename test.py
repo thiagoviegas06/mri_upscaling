@@ -6,10 +6,12 @@ from nibabel.processing import resample_from_to
 from tqdm import tqdm
 
 # Import the wrapper that combines UNet + Refiner
-from refiner_model import RRDBNet, CascadedModel
+from refiner_model import SMPRefiner, CascadedModel
 from model import UNet3D
 from preprocessing import preprocess_volume
 from mri_resolution.extract_slices import create_submission_df
+
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 def load_cascaded_model(unet_path="checkpoints/best.ckpt", refiner_path="checkpoints/refiner_best.ckpt", device="cpu"):
     """
@@ -17,14 +19,14 @@ def load_cascaded_model(unet_path="checkpoints/best.ckpt", refiner_path="checkpo
     that behaves like a standard 3D model (Input: 3D Patch -> Output: 3D Patch).
     """
     # 1. Load UNet
-    unet = UNet3D(base=56).to(device)
+    unet = UNet3D(base=16).to(device)
     unet_ckpt = torch.load(unet_path, map_location=device)
     # Handle potentially different checkpoint structures
     unet_state = unet_ckpt["ema"] if "ema" in unet_ckpt else unet_ckpt["model"]
     unet.load_state_dict(unet_state)
     
     # 2. Load Refiner
-    refiner = RRDBNet(in_nc=1, out_nc=1, nf=64, nb=4).to(device)
+    refiner = SMPRefiner(encoder_name="mobilenet_v2", encoder_weights="imagenet").to(DEVICE)
     refiner_ckpt = torch.load(refiner_path, map_location=device)
     refiner_state = refiner_ckpt["ema"] if "ema" in refiner_ckpt else (refiner_ckpt["model"] if "model" in refiner_ckpt else refiner_ckpt)
     refiner.load_state_dict(refiner_state)
