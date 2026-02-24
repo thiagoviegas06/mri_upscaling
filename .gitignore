@@ -2,3 +2,9 @@ mri_resolution/
 .kaggle/
 submission.csv
 __pycache__/
+checkpoints/
+mri_resolution/
+visualization/
+*.ipynb
+*.pptx
+*.pdf
