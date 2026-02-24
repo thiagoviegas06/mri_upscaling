@@ -6,3 +6,4 @@ mri_resolution/
 *.docx
 *.pyc
 __pycache__/
+checkpoints/
