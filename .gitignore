@@ -3,3 +3,6 @@ mri_resolution/
 __pycache__/
 *.ipynb_checkpoints
 *.ipynb
+*.pptx
+*.pdf
+checkpoints/
