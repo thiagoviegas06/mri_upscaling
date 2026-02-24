@@ -1,2 +1,8 @@
 mri_resolution/
 .kaggle/
+*.ipynb_checkpoints
+*.ipynb
+*.pptx
+*.docx
+*.pyc
+__pycache__/
